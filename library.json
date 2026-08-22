@@ -1,0 +1,10 @@
+{
+    "id": "{4DA50D0C-FCCE-40FC-9C3F-A6C6D7D4E3AE}",
+    "author": "Martin Wilkens",
+    "name": "Room Dashboard",
+    "description": "Generisches Raum-Dashboard fuer IP-Symcon: eine Instanz pro Raum, gleicher dunkler Kachel-Stil wie die anderen Dashboards. Feste optionale Widgets fuer Praesenz, Lueftung und Sonos (Player/Playlist/Gruppe), plus frei konfigurierbare Listen fuer Lichter, Rolllaeden und Sensoren -- jeder Raum hat so viele Eintraege wie er tatsaechlich braucht.",
+    "version": "1.0",
+    "build": 1,
+    "date": 1787395096,
+    "url": "https://github.com/mwilkens780/IPSymcon-RoomDashboard"
+}

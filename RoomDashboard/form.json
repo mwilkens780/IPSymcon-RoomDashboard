@@ -1,0 +1,114 @@
+{
+  "elements": [
+    {
+      "type": "NumberSpinner",
+      "name": "update_interval",
+      "caption": "Aktualisierungsintervall (Sekunden)",
+      "minimum": 15,
+      "suffix": "s"
+    },
+    {
+      "type": "Label",
+      "caption": "Eine Instanz pro Raum. Alle Felder sind optional -- ungenutzte Widgets/Listen werden im Dashboard einfach nicht angezeigt."
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Präsenz (optional)",
+      "expanded": false,
+      "items": [
+        { "type": "SelectVariable", "name": "var_presence", "caption": "Präsenzmelder (Boolean)" }
+      ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Lüftung (optional)",
+      "expanded": false,
+      "items": [
+        { "type": "SelectVariable", "name": "var_ventilation", "caption": "Betriebsart/Stufe (Variable mit Profil-Auswahlliste)", "requiredAction": 1 },
+        { "type": "Label", "caption": "Die Auswahlmöglichkeiten werden automatisch aus dem Wertprofil der ausgewählten Variable übernommen (z.B. Aus/Stufe 1/Stufe 2/...)." }
+      ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Sonos (optional)",
+      "expanded": false,
+      "items": [
+        {
+          "type": "SelectInstance",
+          "name": "sonos_instance",
+          "caption": "Sonos-Player-Instanz",
+          "validModules": ["{52F6586D-A1C7-AAC6-309B-E12A70F6EEF6}"]
+        },
+        { "type": "Label", "caption": "Play/Pause/Weiter/Zurück, Lautstärke, Stumm, Playlist- und Gruppenauswahl werden automatisch aus der Sonos-Instanz gelesen -- keine weitere Konfiguration nötig." }
+      ]
+    },
+    {
+      "type": "List",
+      "name": "lights",
+      "caption": "Lichter",
+      "rowCount": 5,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Variable (Schalter oder Dimmer)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+      ],
+      "values": []
+    },
+    {
+      "type": "List",
+      "name": "shutters",
+      "caption": "Rollläden",
+      "rowCount": 4,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Variable (Position 0-100)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+      ],
+      "values": []
+    },
+    {
+      "type": "List",
+      "name": "sensors",
+      "caption": "Sensoren & Kontakte",
+      "rowCount": 6,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "180px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Variable", "name": "variable", "width": "200px", "add": 0, "edit": { "type": "SelectVariable" } },
+        {
+          "caption": "Typ",
+          "name": "type",
+          "width": "160px",
+          "add": "generic",
+          "edit": {
+            "type": "Select",
+            "options": [
+              { "caption": "Fenster", "value": "window" },
+              { "caption": "Tür", "value": "door" },
+              { "caption": "Feuchtigkeit (%)", "value": "humidity" },
+              { "caption": "Rauchmelder", "value": "smoke" },
+              { "caption": "Sirene", "value": "siren" },
+              { "caption": "Sonstiges (Zahl)", "value": "generic" }
+            ]
+          }
+        }
+      ],
+      "values": []
+    }
+  ],
+  "actions": [
+    {
+      "type": "Button",
+      "caption": "Jetzt aktualisieren",
+      "onClick": "RMD_Refresh($id);"
+    }
+  ],
+  "status": [
+    { "code": 102, "icon": "active",   "caption": "Aktiv" },
+    { "code": 200, "icon": "error",    "caption": "Fehler – Details im IPS-Log" },
+    { "code": 201, "icon": "inactive", "caption": "Nicht konfiguriert – mindestens ein Element hinzufügen" }
+  ]
+}
