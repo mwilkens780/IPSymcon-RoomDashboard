@@ -234,6 +234,57 @@ class RoomDashboard extends IPSModule
         return $id ?: 0;
     }
 
+    private const GENERIC_NAMES = [
+        'state', 'level', 'zustand', 'wert', 'status', 'value', 'variable',
+        'unbenannt', 'unnamed', 'neues objekt', 'new object',
+    ];
+
+    private function isGenericName(string $name): bool
+    {
+        return $name === '' || in_array(mb_strtolower(trim($name)), self::GENERIC_NAMES, true);
+    }
+
+    /**
+     * The name a user would actually recognise, with no manual entry
+     * required: the variable's own object name if it's descriptive, or --
+     * since many integrations (Homematic in particular) name the leaf
+     * variable itself something generic like "STATE" while the actual
+     * device carries the real name -- the nearest ancestor with a
+     * non-generic name instead.
+     */
+    private function deviceName(int $varId): string
+    {
+        if ($varId <= 0) {
+            return '';
+        }
+        $name = IPS_GetName($varId);
+        if (!$this->isGenericName($name)) {
+            return $name;
+        }
+        $parentId = IPS_GetParent($varId);
+        for ($depth = 0; $parentId > 0 && $depth < 4; $depth++) {
+            $parentName = IPS_GetName($parentId);
+            if (!$this->isGenericName($parentName)) {
+                return $parentName;
+            }
+            $parentId = IPS_GetParent($parentId);
+        }
+        return $name;
+    }
+
+    /** The room's own name: whichever category this instance is filed under, so no manual room-name entry is needed either. */
+    private function roomName(): string
+    {
+        $parentId = IPS_GetParent($this->InstanceID);
+        if ($parentId > 0) {
+            $parentName = IPS_GetName($parentId);
+            if ($parentName !== '') {
+                return $parentName;
+            }
+        }
+        return IPS_GetName($this->InstanceID);
+    }
+
     private function collectData(): array
     {
         $presenceId = $this->ReadPropertyInteger('var_presence');
@@ -249,7 +300,7 @@ class RoomDashboard extends IPSModule
         $sensors = $this->collectSensors();
 
         return [
-            'roomName'    => IPS_GetName($this->InstanceID),
+            'roomName'    => $this->roomName(),
             'presence'    => $presence,
             'ventValue'   => $ventValue === null ? null : (string) $ventValue,
             'ventOptions' => $ventAssoc,
@@ -312,7 +363,7 @@ class RoomDashboard extends IPSModule
             $raw    = GetValue($varId);
             $out[]  = [
                 'ident'  => 'light_' . $i,
-                'name'   => $row['name'] !== '' ? $row['name'] : 'Licht',
+                'name'   => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
                 'isBool' => $isBool,
                 'on'     => $isBool ? (bool) $raw : ((float) $raw > 0),
                 'value'  => $isBool ? null : (float) $raw,
@@ -331,7 +382,7 @@ class RoomDashboard extends IPSModule
             }
             $out[] = [
                 'ident' => 'shutter_' . $i,
-                'name'  => $row['name'] !== '' ? $row['name'] : 'Rollladen',
+                'name'  => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
                 'value' => (float) GetValue($varId),
             ];
         }
@@ -349,7 +400,7 @@ class RoomDashboard extends IPSModule
             $type = $row['type'] ?? 'generic';
             $raw  = GetValue($varId);
             $out[] = [
-                'name'  => $row['name'] !== '' ? $row['name'] : 'Sensor',
+                'name'  => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
                 'type'  => $type,
                 'bool'  => in_array($type, self::SENSOR_BOOL_TYPES, true) ? (bool) $raw : null,
                 'value' => in_array($type, self::SENSOR_BOOL_TYPES, true) ? null : (float) $raw,
