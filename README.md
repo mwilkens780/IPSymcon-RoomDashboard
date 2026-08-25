@@ -14,11 +14,12 @@ Danach für jeden Raum eine eigene Instanz anlegen und den Instanznamen auf den 
 ## Konfiguration
 
 - **Präsenz, Sonos, Luftfeuchtigkeit**: feste, aber optionale Felder. Ohne Zuweisung wird das jeweilige Widget im Dashboard einfach nicht angezeigt.
-  - Sonos: nur die Player-Instanz auswählen, der Rest (Play/Pause, aktueller Titel, Lautstärke, Playlist, Gruppe) wird automatisch aus den vorhandenen Sonos-Variablen gelesen.
+  - Sonos: nur die Player-Instanz auswählen, der Rest (Play/Pause, aktueller Titel, Lautstärke, Playlist, Gruppe) wird automatisch aus den vorhandenen Sonos-Variablen gelesen. Gruppieren fügt den ausgewählten Player als Mitglied *dieses* Raums hinzu (der eigene Titel spielt weiter, statt dass dieser Raum den Inhalt des anderen Players übernimmt); "keine" trennt alle eventuell mit diesem Raum gruppierten Player wieder.
   - Luftfeuchtigkeit: nur die Luftfeuchtigkeitsrechner-Instanz auswählen -- Lüftungsempfehlung, Ergebnistext und Taupunkte werden automatisch übernommen.
 - **Temperatur (Soll/Ist)**: frei erweiterbare Liste, pro Zeile eine Soll- und/oder Ist-Temperatur-Variable (z.B. Thermostat).
 - **Status-Variablen**: frei erweiterbare Liste für beliebige Variablen mit Wertprofil-Auswahlliste (z.B. Bewohner-Status im Schlafzimmer) -- Auswahlmöglichkeiten werden automatisch aus dem Profil übernommen, direkt über das Dashboard änderbar.
-- **Lichter, Rollläden, Sensoren**: frei erweiterbare Listen (beliebig viele Zeilen, auch keine). Lichter erkennen automatisch, ob die Variable ein Schalter (Ein/Aus) oder ein Dimmer (Schieberegler) ist. Sensoren haben einen Typ (Fenster/Tür/Feuchtigkeit/Rauchmelder/Sirene/Sonstiges), der bestimmt, wie sie dargestellt werden.
+- **Lichter**: frei erweiterbare Liste. Bei Hue- oder Govee-Lampen den obersten Geräteknoten (die Instanz) auswählen statt einer Rohvariable -- das Modul erkennt Hersteller und Typ (Schalter/Dimmer/Farbe) automatisch und bindet die passenden Bedienelemente (Schalter, Helligkeitsregler, Farbwähler) einheitlich in die Kachel ein. Bei einfachen Schaltern/Dimmern (z.B. Homematic) weiterhin die Variable selbst wählen.
+- **Rollläden, Sensoren**: frei erweiterbare Listen (beliebig viele Zeilen, auch keine). Sensoren haben einen Typ (Fenster/Tür/Feuchtigkeit/Rauchmelder/Sirene/Sonstiges), der bestimmt, wie sie dargestellt werden.
 
 ## Funktionsweise
 

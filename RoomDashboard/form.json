@@ -83,9 +83,13 @@
       "delete": true,
       "columns": [
         { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
-        { "caption": "Variable (Schalter oder Dimmer)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+        { "caption": "Gerät (Schalter/Dimmer-Variable oder Hue-/Govee-Instanz)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectObject", "validObjectTypes": [1, 2] } }
       ],
       "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Bei Hue- oder Govee-Lampen den obersten Geräteknoten auswählen (nicht die Rohvariable) -- Typ (Schalter/Dimmer/Farbe) und Bedienelemente werden automatisch erkannt. Bei einfachen Schaltern/Dimmern wie gewohnt die Variable selbst wählen."
     },
     {
       "type": "List",

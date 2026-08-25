@@ -104,7 +104,12 @@ class RoomDashboard extends IPSModule
             }
 
             if (strpos($Ident, 'light_') === 0) {
-                $this->forwardListAction('lights', (int) substr($Ident, strlen('light_')), $Value, $Ident);
+                // light_{index}_{control}, e.g. "light_0_on", "light_0_brightness", "light_0_color"
+                $rest = substr($Ident, strlen('light_'));
+                $sep  = strpos($rest, '_');
+                if ($sep !== false) {
+                    $this->forwardLightAction((int) substr($rest, 0, $sep), substr($rest, $sep + 1), $Value, $Ident);
+                }
                 return;
             }
 
@@ -135,9 +140,15 @@ class RoomDashboard extends IPSModule
         if ($sonosId <= 0) {
             return;
         }
+
+        if ($key === 'group') {
+            $this->forwardSonosGroupAction($sonosId, (int) $value, $pushIdent);
+            return;
+        }
+
         $map = [
             'status' => 'Status', 'volume' => 'Volume', 'groupvolume' => 'GroupVolume',
-            'mute' => 'Mute', 'playlist' => 'Playlist', 'group' => 'MemberOfGroup',
+            'mute' => 'Mute', 'playlist' => 'Playlist',
         ];
         if (!isset($map[$key])) {
             return;
@@ -151,6 +162,46 @@ class RoomDashboard extends IPSModule
         $this->pushValue($pushIdent, $cast);
     }
 
+    /**
+     * The Sonos module's own SetGroup($coordinator) makes the instance you
+     * call it ON join $coordinator as a satellite -- it stops playing its
+     * own queue and inherits the coordinator's content instead. Writing to
+     * this room's own MemberOfGroup therefore made THIS room follow the
+     * other one, which is backwards from what a per-room dashboard wants:
+     * this room should stay the coordinator and pull the other player in,
+     * so its own content keeps playing everywhere. That means the write
+     * has to target the OTHER instance's own MemberOfGroup, pointed at
+     * this one -- never this instance's own.
+     */
+    private function forwardSonosGroupAction(int $sonosId, int $targetInstanceId, string $pushIdent): void
+    {
+        if ($targetInstanceId > 0) {
+            $otherGroupVarId = $this->varIdByIdent($targetInstanceId, 'MemberOfGroup');
+            if ($otherGroupVarId > 0) {
+                RequestAction($otherGroupVarId, $sonosId);
+            }
+            $this->pushValue($pushIdent, (string) $targetInstanceId);
+            return;
+        }
+
+        // "keine" selected: release every known candidate player that might
+        // currently be joined to us. We cannot read who actually is --
+        // Sonos only exposes group membership on the joining side, not the
+        // coordinator side -- so releasing all of them is the only reliable
+        // way; it's a harmless no-op for anyone that wasn't grouped with us.
+        foreach ($this->variableAssociations($this->varIdByIdent($sonosId, 'MemberOfGroup')) as $opt) {
+            $otherId = (int) $opt['Value'];
+            if ($otherId <= 0) {
+                continue;
+            }
+            $otherGroupVarId = $this->varIdByIdent($otherId, 'MemberOfGroup');
+            if ($otherGroupVarId > 0) {
+                RequestAction($otherGroupVarId, 0);
+            }
+        }
+        $this->pushValue($pushIdent, '0');
+    }
+
     private function forwardListAction(string $listProp, int $index, $value, string $pushIdent, string $column = 'variable'): void
     {
         $rows = json_decode($this->ReadPropertyString($listProp), true) ?: [];
@@ -158,6 +209,58 @@ class RoomDashboard extends IPSModule
             return;
         }
         $targetId = (int) $rows[$index][$column];
+        if ($targetId <= 0) {
+            return;
+        }
+        $cast = $this->castToVarType($targetId, $value);
+        RequestAction($targetId, $cast);
+        $this->pushValue($pushIdent, $cast);
+    }
+
+    /**
+     * Known "smart light" device-instance module types and the idents of
+     * their on/brightness/color variables, so the lights list can accept a
+     * top-level device node (Hue Light/Grouped Light instance, Govee
+     * device instance) instead of forcing the user to pick the raw
+     * variable, with the module figuring out which controls apply.
+     */
+    private const LIGHT_MODULE_IDENTS = [
+        '{87FA14D1-0ACA-4CBD-BE83-BA4DF8831876}' => ['on', 'brightness', 'color'],       // HUE Light
+        '{6324AC4A-330C-4CB2-9281-12EECB450024}' => ['on', 'brightness', 'color'],       // HUE Grouped Light
+        '{BFF4858B-78B1-B4AD-B755-24AEC44EACFF}' => ['State', 'Brightness', 'Color'],    // Govee Device
+    ];
+
+    private function forwardLightAction(int $index, string $control, $value, string $pushIdent): void
+    {
+        $rows = json_decode($this->ReadPropertyString('lights'), true) ?: [];
+        if (!isset($rows[$index]['variable'])) {
+            return;
+        }
+        $nodeId = (int) $rows[$index]['variable'];
+        if ($nodeId <= 0) {
+            return;
+        }
+
+        $targetId = 0;
+        if (@IPS_InstanceExists($nodeId)) {
+            $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
+            $idents   = self::LIGHT_MODULE_IDENTS[$moduleId] ?? null;
+            if ($idents === null) {
+                return;
+            }
+            [$onIdent, $brightIdent, $colorIdent] = $idents;
+            $identMap = ['on' => $onIdent, 'brightness' => $brightIdent, 'color' => $colorIdent];
+            if (!isset($identMap[$control])) {
+                return;
+            }
+            $targetId = $this->varIdByIdent($nodeId, $identMap[$control]);
+        } elseif (@IPS_VariableExists($nodeId)) {
+            // Plain switch/dimmer variable: on/off and brightness both act
+            // on the same single variable (only one control is ever
+            // actually rendered for it, based on its own type).
+            $targetId = $nodeId;
+        }
+
         if ($targetId <= 0) {
             return;
         }
@@ -373,21 +476,65 @@ class RoomDashboard extends IPSModule
     {
         $out = [];
         foreach (json_decode($this->ReadPropertyString('lights'), true) ?: [] as $i => $row) {
-            $varId = (int) ($row['variable'] ?? 0);
-            if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+            $nodeId = (int) ($row['variable'] ?? 0);
+            if ($nodeId <= 0) {
                 continue;
             }
-            $isBool = (int) IPS_GetVariable($varId)['VariableType'] === 0;
-            $raw    = GetValue($varId);
-            $out[]  = [
-                'ident'  => 'light_' . $i,
-                'name'   => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
-                'isBool' => $isBool,
-                'on'     => $isBool ? (bool) $raw : ((float) $raw > 0),
-                'value'  => $isBool ? null : (float) $raw,
-            ];
+            $nameOverride = ($row['name'] ?? '') !== '' ? $row['name'] : null;
+            $light = $this->buildLight($nodeId, 'light_' . $i, $nameOverride);
+            if ($light !== null) {
+                $out[] = $light;
+            }
         }
         return $out;
+    }
+
+    /**
+     * Classifies a configured lights-list node into a uniform shape the
+     * dashboard can render the same way regardless of manufacturer: a
+     * top-level Hue/Govee device instance is recognised via its module
+     * GUID and its on/brightness/color child variables located by ident;
+     * a plain switch or dimmer variable (e.g. Homematic) is used directly.
+     */
+    private function buildLight(int $nodeId, string $ident, ?string $nameOverride): ?array
+    {
+        if (@IPS_InstanceExists($nodeId)) {
+            $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
+            $idents   = self::LIGHT_MODULE_IDENTS[$moduleId] ?? null;
+            if ($idents === null) {
+                return null;
+            }
+            [$onIdent, $brightIdent, $colorIdent] = $idents;
+            $onId     = $this->varIdByIdent($nodeId, $onIdent);
+            $brightId = $this->varIdByIdent($nodeId, $brightIdent);
+            $colorId  = $this->varIdByIdent($nodeId, $colorIdent);
+            if ($onId <= 0) {
+                return null;
+            }
+            return [
+                'ident'      => $ident,
+                'name'       => $nameOverride ?? $this->deviceName($nodeId),
+                'kind'       => $colorId > 0 ? 'color' : ($brightId > 0 ? 'dimmer' : 'switch'),
+                'on'         => (bool) $this->readVarById($onId),
+                'brightness' => $brightId > 0 ? (float) $this->readVarById($brightId) : null,
+                'color'      => $colorId > 0 ? (int) $this->readVarById($colorId) : null,
+            ];
+        }
+
+        if (@IPS_VariableExists($nodeId)) {
+            $isBool = (int) IPS_GetVariable($nodeId)['VariableType'] === 0;
+            $raw    = GetValue($nodeId);
+            return [
+                'ident'      => $ident,
+                'name'       => $nameOverride ?? $this->deviceName($nodeId),
+                'kind'       => $isBool ? 'switch' : 'dimmer',
+                'on'         => $isBool ? (bool) $raw : ((float) $raw > 0),
+                'brightness' => $isBool ? null : (float) $raw,
+                'color'      => null,
+            ];
+        }
+
+        return null;
     }
 
     private function collectShutters(): array
@@ -511,17 +658,41 @@ class RoomDashboard extends IPSModule
     {
         $nameEsc = htmlspecialchars($light['name'], ENT_QUOTES);
         $ident   = $light['ident'];
-        if ($light['isBool']) {
+
+        if ($light['kind'] === 'switch') {
             $checked = $light['on'] ? ' checked' : '';
             return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-                . "<label class=\"toggle\"><input id=\"{$ident}_input\" type=\"checkbox\"{$checked} onchange=\"requestAction('{$ident}', this.checked)\">"
+                . "<label class=\"toggle\"><input id=\"{$ident}_on_input\" type=\"checkbox\"{$checked} onchange=\"requestAction('{$ident}_on', this.checked)\">"
                 . '<span class="toggle-track"><span class="toggle-thumb"></span></span></label></div>';
         }
-        $val = (int) round($light['value']);
-        return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-            . "<input id=\"{$ident}_range\" type=\"range\" min=\"0\" max=\"100\" value=\"{$val}\" class=\"light-slider\" "
-            . "oninput=\"document.getElementById('{$ident}_val').textContent=this.value+'%'\" onchange=\"requestAction('{$ident}', parseInt(this.value))\">"
-            . "<span id=\"{$ident}_val\" class=\"light-value\">{$val}%</span></div>";
+
+        if ($light['kind'] === 'dimmer') {
+            $val = (int) round($light['brightness'] ?? 0);
+            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
+                . "<input id=\"{$ident}_brightness_range\" type=\"range\" min=\"0\" max=\"100\" value=\"{$val}\" class=\"light-slider\" "
+                . "oninput=\"document.getElementById('{$ident}_brightness_val').textContent=this.value+'%'\" onchange=\"requestAction('{$ident}_brightness', parseInt(this.value))\">"
+                . "<span id=\"{$ident}_brightness_val\" class=\"light-value\">{$val}%</span></div>";
+        }
+
+        // 'color': switch + brightness + color picker, uniform regardless of manufacturer.
+        $checked  = $light['on'] ? ' checked' : '';
+        $val      = (int) round($light['brightness'] ?? 0);
+        $colorHex = '#' . str_pad(dechex(max(0, (int) ($light['color'] ?? 0))), 6, '0', STR_PAD_LEFT);
+        return <<<COLORLIGHT
+<div class="light-tile light-tile-color">
+  <div class="light-tile-head">
+    <span class="light-name">{$nameEsc}</span>
+    <label class="toggle"><input id="{$ident}_on_input" type="checkbox"{$checked} onchange="requestAction('{$ident}_on', this.checked)">
+      <span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+  </div>
+  <div class="light-tile-controls">
+    <input id="{$ident}_color_input" type="color" class="color-picker" value="{$colorHex}" onchange="requestAction('{$ident}_color', parseInt(this.value.substring(1),16))">
+    <input id="{$ident}_brightness_range" type="range" min="0" max="100" value="{$val}" class="light-slider"
+      oninput="document.getElementById('{$ident}_brightness_val').textContent=this.value+'%'" onchange="requestAction('{$ident}_brightness', parseInt(this.value))">
+    <span id="{$ident}_brightness_val" class="light-value">{$val}%</span>
+  </div>
+</div>
+COLORLIGHT;
     }
 
     private function renderShutterTile(array $shutter): string
@@ -788,6 +959,10 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .thermo-target{display:flex;align-items:center;gap:6px;font-size:11px;color:#8aa8c8}
 .thermo-input{width:56px;background:#0f1c30;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:3px 6px;font-size:12px}
 .humidity-result{font-size:12px;color:#8aa8c8;line-height:1.4}
+.light-tile-color{gap:6px}
+.light-tile-head{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.light-tile-controls{display:flex;align-items:center;gap:8px}
+.color-picker{width:26px;height:26px;flex:none;border:1px solid #2a3a50;border-radius:6px;padding:0;background:none;cursor:pointer}
 </style>
 </head>
 <body>
@@ -884,15 +1059,14 @@ window.handleMessage = function(raw) {
     }
 
     (val.lights || []).forEach(function(light) {
-      if (light.isBool) {
-        var input = document.getElementById(light.ident + '_input');
-        if (input) input.checked = light.on;
-      } else {
-        var range = document.getElementById(light.ident + '_range');
-        var lbl = document.getElementById(light.ident + '_val');
-        if (range) range.value = Math.round(light.value);
-        if (lbl) lbl.textContent = Math.round(light.value) + '%';
-      }
+      var onInput = document.getElementById(light.ident + '_on_input');
+      if (onInput && light.on != null) onInput.checked = light.on;
+      var range = document.getElementById(light.ident + '_brightness_range');
+      var lbl = document.getElementById(light.ident + '_brightness_val');
+      if (range && light.brightness != null) range.value = Math.round(light.brightness);
+      if (lbl && light.brightness != null) lbl.textContent = Math.round(light.brightness) + '%';
+      var colorInput = document.getElementById(light.ident + '_color_input');
+      if (colorInput && light.color != null) colorInput.value = '#' + ('000000' + light.color.toString(16)).slice(-6);
     });
 
     (val.shutters || []).forEach(function(shutter) {
