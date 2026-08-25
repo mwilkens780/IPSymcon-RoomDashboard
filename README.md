@@ -13,9 +13,11 @@ Danach für jeden Raum eine eigene Instanz anlegen und den Instanznamen auf den 
 
 ## Konfiguration
 
-- **Präsenz, Lüftung, Sonos**: feste, aber optionale Felder. Ohne Zuweisung wird das jeweilige Widget im Dashboard einfach nicht angezeigt.
-  - Lüftung: eine beliebige Variable mit Wertprofil (Betriebsart/Stufe) -- die Auswahlmöglichkeiten werden automatisch aus dem Profil übernommen.
-  - Sonos: nur die Player-Instanz auswählen, der Rest (Play/Pause, Lautstärke, Playlist, Gruppe) wird automatisch aus den vorhandenen Sonos-Variablen gelesen.
+- **Präsenz, Sonos, Luftfeuchtigkeit**: feste, aber optionale Felder. Ohne Zuweisung wird das jeweilige Widget im Dashboard einfach nicht angezeigt.
+  - Sonos: nur die Player-Instanz auswählen, der Rest (Play/Pause, aktueller Titel, Lautstärke, Playlist, Gruppe) wird automatisch aus den vorhandenen Sonos-Variablen gelesen.
+  - Luftfeuchtigkeit: nur die Luftfeuchtigkeitsrechner-Instanz auswählen -- Lüftungsempfehlung, Ergebnistext und Taupunkte werden automatisch übernommen.
+- **Temperatur (Soll/Ist)**: frei erweiterbare Liste, pro Zeile eine Soll- und/oder Ist-Temperatur-Variable (z.B. Thermostat).
+- **Status-Variablen**: frei erweiterbare Liste für beliebige Variablen mit Wertprofil-Auswahlliste (z.B. Bewohner-Status im Schlafzimmer) -- Auswahlmöglichkeiten werden automatisch aus dem Profil übernommen, direkt über das Dashboard änderbar.
 - **Lichter, Rollläden, Sensoren**: frei erweiterbare Listen (beliebig viele Zeilen, auch keine). Lichter erkennen automatisch, ob die Variable ein Schalter (Ein/Aus) oder ein Dimmer (Schieberegler) ist. Sensoren haben einen Typ (Fenster/Tür/Feuchtigkeit/Rauchmelder/Sirene/Sonstiges), der bestimmt, wie sie dargestellt werden.
 
 ## Funktionsweise

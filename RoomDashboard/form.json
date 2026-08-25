@@ -21,15 +21,6 @@
     },
     {
       "type": "ExpansionPanel",
-      "caption": "Lüftung (optional)",
-      "expanded": false,
-      "items": [
-        { "type": "SelectVariable", "name": "var_ventilation", "caption": "Betriebsart/Stufe (Variable mit Profil-Auswahlliste)", "requiredAction": 1 },
-        { "type": "Label", "caption": "Die Auswahlmöglichkeiten werden automatisch aus dem Wertprofil der ausgewählten Variable übernommen (z.B. Aus/Stufe 1/Stufe 2/...)." }
-      ]
-    },
-    {
-      "type": "ExpansionPanel",
       "caption": "Sonos (optional)",
       "expanded": false,
       "items": [
@@ -39,8 +30,49 @@
           "caption": "Sonos-Player-Instanz",
           "validModules": ["{52F6586D-A1C7-AAC6-309B-E12A70F6EEF6}"]
         },
-        { "type": "Label", "caption": "Play/Pause/Weiter/Zurück, Lautstärke, Stumm, Playlist- und Gruppenauswahl werden automatisch aus der Sonos-Instanz gelesen -- keine weitere Konfiguration nötig." }
+        { "type": "Label", "caption": "Play/Pause/Weiter/Zurück, aktueller Titel, Lautstärke, Stumm, Playlist- und Gruppenauswahl werden automatisch aus der Sonos-Instanz gelesen -- keine weitere Konfiguration nötig." }
       ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Luftfeuchtigkeit (optional)",
+      "expanded": false,
+      "items": [
+        {
+          "type": "SelectInstance",
+          "name": "humidity_instance",
+          "caption": "Luftfeuchtigkeitsrechner-Instanz",
+          "validModules": ["{B4F9A13F-13F3-FA6D-6745-4DB513A13B25}"]
+        },
+        { "type": "Label", "caption": "Lüftungsempfehlung, Ergebnistext und Taupunkte werden automatisch aus der Rechner-Instanz gelesen." }
+      ]
+    },
+    {
+      "type": "List",
+      "name": "thermostats",
+      "caption": "Temperatur (Soll/Ist)",
+      "rowCount": 3,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "180px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Soll-Temperatur", "name": "soll", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } },
+        { "caption": "Ist-Temperatur", "name": "ist", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+      ],
+      "values": []
+    },
+    {
+      "type": "List",
+      "name": "statusVars",
+      "caption": "Status-Variablen (z.B. Bewohner-Status)",
+      "rowCount": 3,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Variable (mit Profil-Auswahlliste)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+      ],
+      "values": []
     },
     {
       "type": "List",

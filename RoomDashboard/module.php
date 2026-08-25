@@ -15,12 +15,17 @@ class RoomDashboard extends IPSModule
         $this->RegisterPropertyInteger('update_interval', 60);
 
         $this->RegisterPropertyInteger('var_presence', 0);
-        $this->RegisterPropertyInteger('var_ventilation', 0);
         $this->RegisterPropertyInteger('sonos_instance', 0);
+        $this->RegisterPropertyInteger('humidity_instance', 0);
 
         $this->RegisterPropertyString('lights', '[]');
         $this->RegisterPropertyString('shutters', '[]');
         $this->RegisterPropertyString('sensors', '[]');
+        // Any variable with a value profile that has associations (mode
+        // selectors, status enums) -- covers Lueftung, Bewohner-Status, and
+        // anything similar without needing a dedicated slot for each one.
+        $this->RegisterPropertyString('statusVars', '[]');
+        $this->RegisterPropertyString('thermostats', '[]');
 
         $this->RegisterTimer('UpdateTimer', 0, 'RMD_Refresh($_IPS[\'TARGET\']);');
 
@@ -36,14 +41,17 @@ class RoomDashboard extends IPSModule
     {
         parent::ApplyChanges();
 
-        $lights   = json_decode($this->ReadPropertyString('lights'), true) ?: [];
-        $shutters = json_decode($this->ReadPropertyString('shutters'), true) ?: [];
-        $sensors  = json_decode($this->ReadPropertyString('sensors'), true) ?: [];
+        $lights      = json_decode($this->ReadPropertyString('lights'), true) ?: [];
+        $shutters    = json_decode($this->ReadPropertyString('shutters'), true) ?: [];
+        $sensors     = json_decode($this->ReadPropertyString('sensors'), true) ?: [];
+        $statusVars  = json_decode($this->ReadPropertyString('statusVars'), true) ?: [];
+        $thermostats = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
 
         $hasAnything = $this->ReadPropertyInteger('var_presence') > 0
-            || $this->ReadPropertyInteger('var_ventilation') > 0
             || $this->ReadPropertyInteger('sonos_instance') > 0
-            || count($lights) > 0 || count($shutters) > 0 || count($sensors) > 0;
+            || $this->ReadPropertyInteger('humidity_instance') > 0
+            || count($lights) > 0 || count($shutters) > 0 || count($sensors) > 0
+            || count($statusVars) > 0 || count($thermostats) > 0;
 
         if (!$hasAnything) {
             $this->SetStatus(201);
@@ -90,11 +98,6 @@ class RoomDashboard extends IPSModule
     public function RequestAction($Ident, $Value): void
     {
         try {
-            if ($Ident === 'vent_mode') {
-                $this->forwardToProperty('var_ventilation', $Value, $Ident);
-                return;
-            }
-
             if (strpos($Ident, 'sonos_') === 0) {
                 $this->forwardSonosAction(substr($Ident, strlen('sonos_')), $Value, $Ident);
                 return;
@@ -110,21 +113,20 @@ class RoomDashboard extends IPSModule
                 return;
             }
 
+            if (strpos($Ident, 'status_') === 0) {
+                $this->forwardListAction('statusVars', (int) substr($Ident, strlen('status_')), $Value, $Ident);
+                return;
+            }
+
+            if (strpos($Ident, 'thermostat_') === 0) {
+                $this->forwardListAction('thermostats', (int) substr($Ident, strlen('thermostat_')), $Value, $Ident, 'soll');
+                return;
+            }
+
             $this->LogMessage("RoomDashboard RequestAction: unknown ident {$Ident}", KL_WARNING);
         } catch (\Throwable $e) {
             $this->LogMessage('RoomDashboard RequestAction ' . $Ident . ': ' . $e->getMessage(), KL_ERROR);
         }
-    }
-
-    private function forwardToProperty(string $prop, $value, string $pushIdent): void
-    {
-        $targetId = $this->ReadPropertyInteger($prop);
-        if ($targetId <= 0) {
-            return;
-        }
-        $cast = $this->castToVarType($targetId, $value);
-        RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
     }
 
     private function forwardSonosAction(string $key, $value, string $pushIdent): void
@@ -140,7 +142,7 @@ class RoomDashboard extends IPSModule
         if (!isset($map[$key])) {
             return;
         }
-        $targetId = $this->sonosVarId($sonosId, $map[$key]);
+        $targetId = $this->varIdByIdent($sonosId, $map[$key]);
         if ($targetId <= 0) {
             return;
         }
@@ -149,13 +151,13 @@ class RoomDashboard extends IPSModule
         $this->pushValue($pushIdent, $cast);
     }
 
-    private function forwardListAction(string $listProp, int $index, $value, string $pushIdent): void
+    private function forwardListAction(string $listProp, int $index, $value, string $pushIdent, string $column = 'variable'): void
     {
         $rows = json_decode($this->ReadPropertyString($listProp), true) ?: [];
-        if (!isset($rows[$index]['variable'])) {
+        if (!isset($rows[$index][$column])) {
             return;
         }
-        $targetId = (int) $rows[$index]['variable'];
+        $targetId = (int) $rows[$index][$column];
         if ($targetId <= 0) {
             return;
         }
@@ -224,13 +226,13 @@ class RoomDashboard extends IPSModule
         return array_map(static fn (array $a) => ['Value' => $a['Value'], 'Name' => $a['Name']], $assoc);
     }
 
-    /** Resolves a Sonos instance's own variable ID by ident (Status, Volume, Playlist, ...). */
-    private function sonosVarId(int $sonosId, string $ident): int
+    /** Resolves an instance's own variable ID by ident (Sonos Status/Volume/Playlist/..., humidity calculator Hint/Result/..., etc). */
+    private function varIdByIdent(int $instanceId, string $ident): int
     {
-        if ($sonosId <= 0) {
+        if ($instanceId <= 0) {
             return 0;
         }
-        $id = @IPS_GetObjectIDByIdent($ident, $sonosId);
+        $id = @IPS_GetObjectIDByIdent($ident, $instanceId);
         return $id ?: 0;
     }
 
@@ -290,24 +292,24 @@ class RoomDashboard extends IPSModule
         $presenceId = $this->ReadPropertyInteger('var_presence');
         $presence   = $presenceId > 0 ? (bool) $this->readVarById($presenceId) : null;
 
-        $ventId    = $this->ReadPropertyInteger('var_ventilation');
-        $ventValue = $ventId > 0 ? $this->readVarById($ventId) : null;
-        $ventAssoc = $ventId > 0 ? $this->variableAssociations($ventId) : [];
-
-        $sonos   = $this->collectSonos();
-        $lights  = $this->collectLights();
-        $shutters = $this->collectShutters();
-        $sensors = $this->collectSensors();
+        $sonos       = $this->collectSonos();
+        $lights      = $this->collectLights();
+        $shutters    = $this->collectShutters();
+        $sensors     = $this->collectSensors();
+        $statusVars  = $this->collectStatusVars();
+        $thermostats = $this->collectThermostats();
+        $humidity    = $this->collectHumidity();
 
         return [
             'roomName'    => $this->roomName(),
             'presence'    => $presence,
-            'ventValue'   => $ventValue === null ? null : (string) $ventValue,
-            'ventOptions' => $ventAssoc,
             'sonos'       => $sonos,
             'lights'      => $lights,
             'shutters'    => $shutters,
             'sensors'     => $sensors,
+            'statusVars'  => $statusVars,
+            'thermostats' => $thermostats,
+            'humidity'    => $humidity,
             'updated'     => date('d.m. H:i'),
         ];
     }
@@ -319,20 +321,35 @@ class RoomDashboard extends IPSModule
             return null;
         }
 
-        $statusId      = $this->sonosVarId($sonosId, 'Status');
-        $volumeId      = $this->sonosVarId($sonosId, 'Volume');
-        $muteId        = $this->sonosVarId($sonosId, 'Mute');
-        $playlistId    = $this->sonosVarId($sonosId, 'Playlist');
-        $groupId       = $this->sonosVarId($sonosId, 'MemberOfGroup');
-        $groupVolumeId = $this->sonosVarId($sonosId, 'GroupVolume');
-        $artistId      = $this->sonosVarId($sonosId, 'Artist');
-        $titleId       = $this->sonosVarId($sonosId, 'Title');
-        $albumId       = $this->sonosVarId($sonosId, 'Album');
-        $coverId       = $this->sonosVarId($sonosId, 'CoverURL');
+        $statusId      = $this->varIdByIdent($sonosId, 'Status');
+        $volumeId      = $this->varIdByIdent($sonosId, 'Volume');
+        $muteId        = $this->varIdByIdent($sonosId, 'Mute');
+        $playlistId    = $this->varIdByIdent($sonosId, 'Playlist');
+        $groupId       = $this->varIdByIdent($sonosId, 'MemberOfGroup');
+        $groupVolumeId = $this->varIdByIdent($sonosId, 'GroupVolume');
+        $artistId      = $this->varIdByIdent($sonosId, 'Artist');
+        $titleId       = $this->varIdByIdent($sonosId, 'Title');
+        $albumId       = $this->varIdByIdent($sonosId, 'Album');
+        $coverId       = $this->varIdByIdent($sonosId, 'CoverURL');
+        $nowPlayingId  = $this->varIdByIdent($sonosId, 'nowPlaying');
 
         // Mirrors the Sonos module's own logic: once a player has joined a
         // group (MemberOfGroup != 0), volume control shifts to GroupVolume.
         $isGrouped = $groupId > 0 && (int) $this->readVarById($groupId) !== 0;
+
+        // "nowPlaying" is always present regardless of the DetailedInformation
+        // instance property, unlike Artist/Title/Album/CoverURL which only
+        // exist when that property is enabled. Use it as the guaranteed
+        // fallback for the track display; the discrete fields (when present)
+        // give a nicer split of title vs. artist.
+        $nowPlaying = $nowPlayingId > 0 ? (string) $this->readVarById($nowPlayingId) : '';
+        $title      = $titleId > 0 ? (string) $this->readVarById($titleId) : '';
+        $artist     = $artistId > 0 ? (string) $this->readVarById($artistId) : '';
+        if ($title === '' && $nowPlaying !== '') {
+            $parts  = explode(' | ', $nowPlaying, 2);
+            $title  = $parts[0];
+            $artist = $artist !== '' ? $artist : ($parts[1] ?? '');
+        }
 
         return [
             'status'         => $statusId > 0 ? (int) $this->readVarById($statusId) : null,
@@ -344,8 +361,9 @@ class RoomDashboard extends IPSModule
             'groupOptions'   => $groupId > 0 ? $this->variableAssociations($groupId) : [],
             'groupVolume'    => $groupVolumeId > 0 ? (int) $this->readVarById($groupVolumeId) : null,
             'isGrouped'      => $isGrouped,
-            'artist'         => $artistId > 0 ? (string) $this->readVarById($artistId) : '',
-            'title'          => $titleId > 0 ? (string) $this->readVarById($titleId) : '',
+            'nowPlaying'     => $nowPlaying,
+            'artist'         => $artist,
+            'title'          => $title,
             'album'          => $albumId > 0 ? (string) $this->readVarById($albumId) : '',
             'cover'          => $coverId > 0 ? (string) $this->readVarById($coverId) : '',
         ];
@@ -407,6 +425,62 @@ class RoomDashboard extends IPSModule
             ];
         }
         return $out;
+    }
+
+    private function collectStatusVars(): array
+    {
+        $out = [];
+        foreach (json_decode($this->ReadPropertyString('statusVars'), true) ?: [] as $i => $row) {
+            $varId = (int) ($row['variable'] ?? 0);
+            if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+                continue;
+            }
+            $out[] = [
+                'ident'   => 'status_' . $i,
+                'name'    => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
+                'value'   => (string) GetValue($varId),
+                'options' => $this->variableAssociations($varId),
+            ];
+        }
+        return $out;
+    }
+
+    private function collectThermostats(): array
+    {
+        $out = [];
+        foreach (json_decode($this->ReadPropertyString('thermostats'), true) ?: [] as $i => $row) {
+            $sollId = (int) ($row['soll'] ?? 0);
+            $istId  = (int) ($row['ist'] ?? 0);
+            if ($sollId <= 0 && $istId <= 0) {
+                continue;
+            }
+            $out[] = [
+                'ident' => 'thermostat_' . $i,
+                'name'  => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($sollId > 0 ? $sollId : $istId),
+                'soll'  => $sollId > 0 ? (float) $this->readVarById($sollId) : null,
+                'ist'   => $istId > 0 ? (float) $this->readVarById($istId) : null,
+            ];
+        }
+        return $out;
+    }
+
+    private function collectHumidity(): ?array
+    {
+        $humId = $this->ReadPropertyInteger('humidity_instance');
+        if ($humId <= 0 || !@IPS_InstanceExists($humId)) {
+            return null;
+        }
+        $hintId   = $this->varIdByIdent($humId, 'Hint');
+        $resultId = $this->varIdByIdent($humId, 'Result');
+        $dpOutId  = $this->varIdByIdent($humId, 'DewPointOutdoor');
+        $dpInId   = $this->varIdByIdent($humId, 'DewPointIndoor');
+
+        return [
+            'hint'        => $hintId > 0 ? (bool) $this->readVarById($hintId) : null,
+            'result'      => $resultId > 0 ? (string) $this->readVarById($resultId) : '',
+            'dewPointOut' => $dpOutId > 0 ? (float) $this->readVarById($dpOutId) : null,
+            'dewPointIn'  => $dpInId > 0 ? (float) $this->readVarById($dpInId) : null,
+        ];
     }
 
     // ─── Rendering ──────────────────────────────────────────────────────────────
@@ -489,6 +563,61 @@ class RoomDashboard extends IPSModule
         return "<div class='cur-tile'><span class='cur-label'>{$label}</span><span{$idAttr} class='cur-value'>{$value}</span></div>";
     }
 
+    private function renderStatusVarTile(array $row): string
+    {
+        $nameEsc = htmlspecialchars($row['name'], ENT_QUOTES);
+        if (count($row['options']) > 0) {
+            $select = $this->renderSelect($row['ident'], $row['options'], $row['value']);
+            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>{$select}</div>";
+        }
+        return $this->renderStatTile('', $nameEsc, htmlspecialchars($row['value'], ENT_QUOTES));
+    }
+
+    private function renderThermostatTile(array $t): string
+    {
+        $nameEsc  = htmlspecialchars($t['name'], ENT_QUOTES);
+        $ident    = $t['ident'];
+        $istStr   = $this->fmtNum($t['ist'], 1) . ' °C';
+        $sollAttr = $t['soll'] !== null ? htmlspecialchars((string) $t['soll'], ENT_QUOTES) : '';
+        $sollCtrl = $t['soll'] !== null
+            ? "<input id=\"{$ident}_soll\" type=\"number\" step=\"0.5\" value=\"{$sollAttr}\" class=\"thermo-input\" "
+                . "onchange=\"requestAction('{$ident}', parseFloat(this.value))\">"
+            : '<span class="cur-value">–</span>';
+        return <<<THERMO
+<div class="thermo-tile">
+  <span class="light-name">🌡️ {$nameEsc}</span>
+  <div class="thermo-row">
+    <span class="cur-value">{$istStr}</span>
+    <span class="thermo-target">Soll: {$sollCtrl}</span>
+  </div>
+</div>
+THERMO;
+    }
+
+    private function renderHumidityPanel(?array $humidity): string
+    {
+        if ($humidity === null) {
+            return '';
+        }
+        $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
+        $hintBadge = $this->renderStatusBadge('humidity_hint', 'Lüften empfohlen', $humidity['hint'], true);
+        $dewHtml = '';
+        if ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null) {
+            $dewHtml = '<div class="current-grid">'
+                . $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C')
+                . $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C')
+                . '</div>';
+        }
+        return <<<HUMID
+<div class="pv-block">
+  <div class="pv-title">💧 Luftfeuchtigkeit</div>
+  <span id="humidity_result" class="humidity-result">{$resultEsc}</span>
+  <div class="status-row">{$hintBadge}</div>
+  {$dewHtml}
+</div>
+HUMID;
+    }
+
     private function renderSonosPanel(?array $sonos): string
     {
         if ($sonos === null) {
@@ -561,13 +690,23 @@ SONOS;
 
         $presenceBadge = $this->renderStatusBadge('presence_badge', '🧍 Präsenz', $d['presence']);
 
-        $ventBlock = '';
-        if ($this->ReadPropertyInteger('var_ventilation') > 0) {
-            $ventSelect = count($d['ventOptions']) > 0
-                ? $this->renderSelect('vent_mode', $d['ventOptions'], $d['ventValue'])
-                : "<span class=\"cur-value\">" . htmlspecialchars($d['ventValue'] ?? '–', ENT_QUOTES) . '</span>';
-            $ventBlock = '<div class="pv-block"><div class="pv-title">🌬️ Lüftung</div>' . $ventSelect . '</div>';
+        $statusVarsHtml = '';
+        foreach ($d['statusVars'] as $row) {
+            $statusVarsHtml .= $this->renderStatusVarTile($row);
         }
+        $statusVarsBlock = $statusVarsHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div><div class="tile-grid">' . $statusVarsHtml . '</div></div>'
+            : '';
+
+        $thermoHtml = '';
+        foreach ($d['thermostats'] as $t) {
+            $thermoHtml .= $this->renderThermostatTile($t);
+        }
+        $thermoBlock = $thermoHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">🌡️ Temperatur</div><div class="tile-grid">' . $thermoHtml . '</div></div>'
+            : '';
+
+        $humidityBlock = $this->renderHumidityPanel($d['humidity']);
 
         $sonosBlock = $this->renderSonosPanel($d['sonos']);
 
@@ -644,6 +783,11 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .sonos-btn-main{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-size:18px}
 .sonos-mute{margin-left:auto}
 .sonos-volume-row{display:flex;flex-direction:column;gap:4px}
+.thermo-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
+.thermo-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.thermo-target{display:flex;align-items:center;gap:6px;font-size:11px;color:#8aa8c8}
+.thermo-input{width:56px;background:#0f1c30;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:3px 6px;font-size:12px}
+.humidity-result{font-size:12px;color:#8aa8c8;line-height:1.4}
 </style>
 </head>
 <body>
@@ -653,7 +797,9 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 
 <div class="status-row">{$presenceBadge}</div>
 
-{$ventBlock}
+{$thermoBlock}
+{$humidityBlock}
+{$statusVarsBlock}
 {$sonosBlock}
 {$lightsBlock}
 {$shuttersBlock}
@@ -693,8 +839,26 @@ window.handleMessage = function(raw) {
       presenceBadge.textContent = '🧍 Präsenz: ' + (val.presence ? 'an' : 'aus');
     }
 
-    var ventSelect = document.getElementById('vent_mode_select');
-    if (ventSelect && val.ventValue != null) ventSelect.value = val.ventValue;
+    (val.statusVars || []).forEach(function(row) {
+      var select = document.getElementById(row.ident + '_select');
+      if (select) select.value = row.value;
+    });
+
+    (val.thermostats || []).forEach(function(t) {
+      var ist = document.getElementById(t.ident + '_soll');
+      if (ist && t.soll != null) ist.value = t.soll;
+    });
+
+    if (val.humidity) {
+      setText('humidity_result', val.humidity.result || '–');
+      setText('humidity_dp_out', val.humidity.dewPointOut != null ? val.humidity.dewPointOut.toFixed(1).replace('.', ',') + ' °C' : '–');
+      setText('humidity_dp_in', val.humidity.dewPointIn != null ? val.humidity.dewPointIn.toFixed(1).replace('.', ',') + ' °C' : '–');
+      var hintBadge = document.getElementById('humidity_hint');
+      if (hintBadge && val.humidity.hint != null) {
+        hintBadge.className = 'badge ' + (val.humidity.hint ? 'badge-warn' : 'badge-off');
+        hintBadge.textContent = 'Lüften empfohlen' + (val.humidity.hint ? ': an' : ': aus');
+      }
+    }
 
     if (val.sonos) {
       setText('sonos_title', val.sonos.title || '–');
