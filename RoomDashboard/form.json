@@ -50,16 +50,19 @@
     {
       "type": "List",
       "name": "thermostats",
-      "caption": "Temperatur (Soll/Ist)",
+      "caption": "Temperatur",
       "rowCount": 3,
       "add": true,
       "delete": true,
       "columns": [
         { "caption": "Name", "name": "name", "width": "180px", "add": "", "edit": { "type": "ValidationTextBox" } },
-        { "caption": "Soll-Temperatur", "name": "soll", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } },
-        { "caption": "Ist-Temperatur", "name": "ist", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+        { "caption": "Thermostat", "name": "node", "width": "auto", "add": 0, "edit": { "type": "SelectObject", "validObjectTypes": [1, 2] } }
       ],
       "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Den Thermostat-Knoten (die Geräte-Instanz) auswählen -- Soll-/Ist-Temperatur und Heizmodus werden automatisch aus den vorhandenen Datenpunkten gelesen. Die Luftfeuchtigkeit wird automatisch aus der Sensoren-Liste übernommen, falls dort ein Feuchtigkeitssensor konfiguriert ist."
     },
     {
       "type": "List",

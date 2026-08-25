@@ -124,7 +124,12 @@ class RoomDashboard extends IPSModule
             }
 
             if (strpos($Ident, 'thermostat_') === 0) {
-                $this->forwardListAction('thermostats', (int) substr($Ident, strlen('thermostat_')), $Value, $Ident, 'soll');
+                // thermostat_{index}_{control}, e.g. "thermostat_0_soll", "thermostat_0_mode"
+                $rest = substr($Ident, strlen('thermostat_'));
+                $sep  = strpos($rest, '_');
+                if ($sep !== false) {
+                    $this->forwardThermostatAction((int) substr($rest, 0, $sep), substr($rest, $sep + 1), $Value, $Ident);
+                }
                 return;
             }
 
@@ -258,6 +263,61 @@ class RoomDashboard extends IPSModule
             // Plain switch/dimmer variable: on/off and brightness both act
             // on the same single variable (only one control is ever
             // actually rendered for it, based on its own type).
+            $targetId = $nodeId;
+        }
+
+        if ($targetId <= 0) {
+            return;
+        }
+        $cast = $this->castToVarType($targetId, $value);
+        RequestAction($targetId, $cast);
+        $this->pushValue($pushIdent, $cast);
+    }
+
+    /**
+     * Homematic (classic and IP) datapoint idents for a heating thermostat
+     * channel. Tried in order since the exact ident can differ between
+     * device generations; the first one that resolves on the configured
+     * node wins.
+     */
+    private const THERMOSTAT_SET_IDENTS    = ['SET_POINT_TEMPERATURE', 'SETPOINT'];
+    private const THERMOSTAT_ACTUAL_IDENTS = ['ACTUAL_TEMPERATURE'];
+    private const THERMOSTAT_MODE_IDENTS   = ['CONTROL_MODE', 'SET_POINT_MODE'];
+    private const THERMOSTAT_RANGE         = [5.0, 30.0, 0.5];
+
+    private function firstVarIdByIdent(int $instanceId, array $idents): int
+    {
+        foreach ($idents as $ident) {
+            $id = $this->varIdByIdent($instanceId, $ident);
+            if ($id > 0) {
+                return $id;
+            }
+        }
+        return 0;
+    }
+
+    private function forwardThermostatAction(int $index, string $control, $value, string $pushIdent): void
+    {
+        $rows = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
+        if (!isset($rows[$index]['node'])) {
+            return;
+        }
+        $nodeId = (int) $rows[$index]['node'];
+        if ($nodeId <= 0) {
+            return;
+        }
+
+        $targetId = 0;
+        if (@IPS_InstanceExists($nodeId)) {
+            $identsByControl = [
+                'soll' => self::THERMOSTAT_SET_IDENTS,
+                'mode' => self::THERMOSTAT_MODE_IDENTS,
+            ];
+            if (!isset($identsByControl[$control])) {
+                return;
+            }
+            $targetId = $this->firstVarIdByIdent($nodeId, $identsByControl[$control]);
+        } elseif (@IPS_VariableExists($nodeId) && $control === 'soll') {
             $targetId = $nodeId;
         }
 
@@ -594,18 +654,45 @@ class RoomDashboard extends IPSModule
 
     private function collectThermostats(): array
     {
+        // Reuse the room's own humidity sensor (from the generic sensors
+        // list) inside the thermostat tile too, instead of asking for it
+        // to be configured a second time -- a room only ever has the one
+        // ambient reading regardless of how many thermostats it has.
+        $humidity = null;
+        foreach ($this->collectSensors() as $sensor) {
+            if ($sensor['type'] === 'humidity') {
+                $humidity = $sensor['value'];
+                break;
+            }
+        }
+
         $out = [];
         foreach (json_decode($this->ReadPropertyString('thermostats'), true) ?: [] as $i => $row) {
-            $sollId = (int) ($row['soll'] ?? 0);
-            $istId  = (int) ($row['ist'] ?? 0);
+            $nodeId = (int) ($row['node'] ?? 0);
+            if ($nodeId <= 0) {
+                continue;
+            }
+
+            $sollId = $istId = $modeId = 0;
+            if (@IPS_InstanceExists($nodeId)) {
+                $sollId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
+                $istId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_ACTUAL_IDENTS);
+                $modeId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_MODE_IDENTS);
+            } elseif (@IPS_VariableExists($nodeId)) {
+                $sollId = $nodeId;
+            }
             if ($sollId <= 0 && $istId <= 0) {
                 continue;
             }
+
             $out[] = [
-                'ident' => 'thermostat_' . $i,
-                'name'  => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($sollId > 0 ? $sollId : $istId),
-                'soll'  => $sollId > 0 ? (float) $this->readVarById($sollId) : null,
-                'ist'   => $istId > 0 ? (float) $this->readVarById($istId) : null,
+                'ident'       => 'thermostat_' . $i,
+                'name'        => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($nodeId),
+                'soll'        => $sollId > 0 ? (float) $this->readVarById($sollId) : null,
+                'ist'         => $istId > 0 ? (float) $this->readVarById($istId) : null,
+                'mode'        => $modeId > 0 ? (string) $this->readVarById($modeId) : null,
+                'modeOptions' => $modeId > 0 ? $this->variableAssociations($modeId) : [],
+                'humidity'    => $humidity,
             ];
         }
         return $out;
@@ -738,29 +825,86 @@ COLORLIGHT;
     {
         $nameEsc = htmlspecialchars($row['name'], ENT_QUOTES);
         if (count($row['options']) > 0) {
-            $select = $this->renderSelect($row['ident'], $row['options'], $row['value']);
-            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>{$select}</div>";
+            $buttonsHtml = '';
+            foreach ($row['options'] as $opt) {
+                $value    = (string) $opt['Value'];
+                $active   = $value === $row['value'] ? ' status-btn-active' : '';
+                $valueEsc = htmlspecialchars($value, ENT_QUOTES);
+                $labelEsc = htmlspecialchars($opt['Name'], ENT_QUOTES);
+                $buttonsHtml .= "<button type=\"button\" class=\"status-btn{$active}\" data-value=\"{$valueEsc}\" "
+                    . "onclick=\"statusVarSelect('{$row['ident']}', '{$valueEsc}', this)\">{$labelEsc}</button>";
+            }
+            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
+                . "<div class=\"status-btn-group\" id=\"{$row['ident']}_group\">{$buttonsHtml}</div></div>";
         }
         return $this->renderStatTile('', $nameEsc, htmlspecialchars($row['value'], ENT_QUOTES));
     }
 
+    /** Thumb (x,y) on the 120x120/r45/center60,60 dial arc for a value in [min,max]. Mirrors HeatingDashboard's dial. */
+    private function dialThumbPos(float $value, float $min, float $max): array
+    {
+        $frac     = $max > $min ? max(0, min(1, ($value - $min) / ($max - $min))) : 0;
+        $angleDeg = -135 + $frac * 270;
+        $rad      = deg2rad($angleDeg);
+        return [round(60 + 45 * sin($rad), 1), round(60 - 45 * cos($rad), 1)];
+    }
+
+    private function renderThermoDial(string $ident, ?float $value): string
+    {
+        [$min, $max, $step] = self::THERMOSTAT_RANGE;
+        $val    = $value ?? $min;
+        [$tx, $ty] = $this->dialThumbPos($val, $min, $max);
+        $valStr = $value !== null ? $this->fmtNum($value, 1) . '°' : '–';
+
+        return "<div class=\"dial\" data-ident=\"{$ident}\" data-min=\"{$min}\" data-max=\"{$max}\" data-step=\"{$step}\" data-value=\"{$val}\">"
+            . '<svg class="dial-svg" viewBox="0 0 120 120">'
+            . '<path class="dial-track" d="M 28.2 91.8 A 45 45 0 1 1 91.8 91.8" fill="none" stroke="#1e2d40" stroke-width="8" stroke-linecap="round"/>'
+            . "<circle class=\"dial-thumb\" cx=\"{$tx}\" cy=\"{$ty}\" r=\"7\" fill=\"#7ec8f0\"/>"
+            . '</svg>'
+            . "<div class=\"dial-value\">{$valStr}</div>"
+            . '</div>';
+    }
+
+    private function renderModeButtons(string $ident, array $options, ?string $current): string
+    {
+        $html = "<div class=\"mode-row\" data-ident=\"{$ident}\">";
+        foreach ($options as $opt) {
+            $value     = (string) $opt['Value'];
+            $activeCls = $current === $value ? ' mode-active' : '';
+            $valueEsc  = htmlspecialchars($value, ENT_QUOTES);
+            $labelEsc  = htmlspecialchars($opt['Name'], ENT_QUOTES);
+            $html .= "<button type=\"button\" class=\"mode-btn{$activeCls}\" data-value=\"{$valueEsc}\" "
+                . "onclick=\"requestAction('{$ident}', '{$valueEsc}')\">{$labelEsc}</button>";
+        }
+        return $html . '</div>';
+    }
+
     private function renderThermostatTile(array $t): string
     {
-        $nameEsc  = htmlspecialchars($t['name'], ENT_QUOTES);
-        $ident    = $t['ident'];
-        $istStr   = $this->fmtNum($t['ist'], 1) . ' °C';
-        $sollAttr = $t['soll'] !== null ? htmlspecialchars((string) $t['soll'], ENT_QUOTES) : '';
-        $sollCtrl = $t['soll'] !== null
-            ? "<input id=\"{$ident}_soll\" type=\"number\" step=\"0.5\" value=\"{$sollAttr}\" class=\"thermo-input\" "
-                . "onchange=\"requestAction('{$ident}', parseFloat(this.value))\">"
-            : '<span class="cur-value">–</span>';
+        $nameEsc = htmlspecialchars($t['name'], ENT_QUOTES);
+        $ident   = $t['ident'];
+        $dial    = $this->renderThermoDial($ident . '_soll', $t['soll']);
+
+        $statsHtml = '';
+        if ($t['ist'] !== null) {
+            $statsHtml .= $this->renderStatTile($ident . '_ist', 'Ist', $this->fmtNum($t['ist'], 1) . ' °C');
+        }
+        if ($t['humidity'] !== null) {
+            $statsHtml .= $this->renderStatTile($ident . '_humidity', 'Feuchtigkeit', $this->fmtNum($t['humidity'], 1) . ' %');
+        }
+
+        $modeHtml = count($t['modeOptions']) > 0
+            ? $this->renderModeButtons($ident . '_mode', $t['modeOptions'], $t['mode'])
+            : '';
+
         return <<<THERMO
 <div class="thermo-tile">
-  <span class="light-name">🌡️ {$nameEsc}</span>
-  <div class="thermo-row">
-    <span class="cur-value">{$istStr}</span>
-    <span class="thermo-target">Soll: {$sollCtrl}</span>
+  <div class="light-name">🌡️ {$nameEsc}</div>
+  <div class="thermo-body">
+    {$dial}
+    <div class="thermo-stats">{$statsHtml}</div>
   </div>
+  {$modeHtml}
 </div>
 THERMO;
     }
@@ -874,7 +1018,7 @@ SONOS;
             $thermoHtml .= $this->renderThermostatTile($t);
         }
         $thermoBlock = $thermoHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🌡️ Temperatur</div><div class="tile-grid">' . $thermoHtml . '</div></div>'
+            ? '<div class="pv-block"><div class="pv-title">🌡️ Temperatur</div><div class="thermo-stack">' . $thermoHtml . '</div></div>'
             : '';
 
         $humidityBlock = $this->renderHumidityPanel($d['humidity']);
@@ -954,15 +1098,24 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .sonos-btn-main{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-size:18px}
 .sonos-mute{margin-left:auto}
 .sonos-volume-row{display:flex;flex-direction:column;gap:4px}
-.thermo-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
-.thermo-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
-.thermo-target{display:flex;align-items:center;gap:6px;font-size:11px;color:#8aa8c8}
-.thermo-input{width:56px;background:#0f1c30;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:3px 6px;font-size:12px}
+.thermo-stack{display:flex;flex-direction:column;gap:8px}
+.thermo-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
+.thermo-body{display:flex;align-items:center;gap:10px}
+.thermo-stats{display:flex;flex-direction:column;gap:6px;flex:1}
+.dial{display:flex;flex-direction:column;align-items:center;gap:2px;width:90px;flex:none;touch-action:none}
+.dial-svg{width:76px;height:76px;cursor:pointer}
+.dial-value{font-size:14px;font-weight:700;margin-top:-46px;pointer-events:none}
+.mode-row{display:flex;gap:4px;flex-wrap:wrap}
+.mode-btn{flex:1;min-width:56px;background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;font-size:10px;padding:5px 2px;cursor:pointer}
+.mode-btn.mode-active{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-weight:700}
 .humidity-result{font-size:12px;color:#8aa8c8;line-height:1.4}
 .light-tile-color{gap:6px}
 .light-tile-head{display:flex;justify-content:space-between;align-items:center;gap:6px}
 .light-tile-controls{display:flex;align-items:center;gap:8px}
 .color-picker{width:26px;height:26px;flex:none;border:1px solid #2a3a50;border-radius:6px;padding:0;background:none;cursor:pointer}
+.status-btn-group{display:flex;flex-wrap:wrap;gap:4px}
+.status-btn{background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer}
+.status-btn-active{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
 </style>
 </head>
 <body>
@@ -1000,6 +1153,89 @@ function sonosTogglePlay() {
   requestAction('sonos_status', playing ? 3 : 2); // Pause : Play
 }
 
+function statusVarSelect(ident, value, btn) {
+  requestAction(ident, value);
+  var group = btn.parentElement;
+  Array.prototype.forEach.call(group.children, function(b) { b.classList.remove('status-btn-active'); });
+  btn.classList.add('status-btn-active');
+}
+
+var dialRoots = {};
+
+function valueToThumb(value, min, max) {
+  var frac = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
+  var angleDeg = -135 + frac * 270;
+  var rad = angleDeg * Math.PI / 180;
+  return { x: 60 + 45 * Math.sin(rad), y: 60 - 45 * Math.cos(rad) };
+}
+
+function initDial(root) {
+  var svg = root.querySelector('.dial-svg');
+  var thumb = root.querySelector('.dial-thumb');
+  var valueEl = root.querySelector('.dial-value');
+  var min = parseFloat(root.dataset.min);
+  var max = parseFloat(root.dataset.max);
+  var step = parseFloat(root.dataset.step);
+  var ident = root.dataset.ident;
+  var dragging = false;
+  var currentValue = parseFloat(root.dataset.value);
+
+  function svgPoint(clientX, clientY) {
+    var pt = svg.createSVGPoint();
+    pt.x = clientX; pt.y = clientY;
+    var ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 60, y: 60 };
+    return pt.matrixTransform(ctm.inverse());
+  }
+
+  function updateVisual(value) {
+    var pos = valueToThumb(value, min, max);
+    thumb.setAttribute('cx', pos.x.toFixed(1));
+    thumb.setAttribute('cy', pos.y.toFixed(1));
+    if (valueEl) valueEl.textContent = value.toFixed(1).replace('.', ',') + '°';
+  }
+
+  function setFromClient(clientX, clientY) {
+    var p = svgPoint(clientX, clientY);
+    var dx = p.x - 60, dy = p.y - 60;
+    var angleDeg = Math.atan2(dx, -dy) * 180 / Math.PI;
+    angleDeg = Math.max(-135, Math.min(135, angleDeg));
+    var frac = (angleDeg + 135) / 270;
+    var value = min + frac * (max - min);
+    value = Math.round(value / step) * step;
+    currentValue = value;
+    updateVisual(value);
+  }
+
+  svg.addEventListener('pointerdown', function(e) {
+    dragging = true;
+    svg.setPointerCapture(e.pointerId);
+    setFromClient(e.clientX, e.clientY);
+  });
+  svg.addEventListener('pointermove', function(e) {
+    if (dragging) setFromClient(e.clientX, e.clientY);
+  });
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    requestAction(ident, currentValue);
+  }
+  svg.addEventListener('pointerup', endDrag);
+  svg.addEventListener('pointercancel', endDrag);
+
+  root._updateVisual = updateVisual;
+  dialRoots[ident] = root;
+}
+document.querySelectorAll('.dial').forEach(initDial);
+
+function updateModeButtons(ident, value) {
+  var row = document.querySelector('.mode-row[data-ident="' + ident + '"]');
+  if (!row) return;
+  row.querySelectorAll('.mode-btn').forEach(function(btn) {
+    btn.classList.toggle('mode-active', btn.dataset.value === value);
+  });
+}
+
 window.handleMessage = function(raw) {
   var msg = JSON.parse(raw);
   var key = msg.key, val = msg.value;
@@ -1015,13 +1251,20 @@ window.handleMessage = function(raw) {
     }
 
     (val.statusVars || []).forEach(function(row) {
-      var select = document.getElementById(row.ident + '_select');
-      if (select) select.value = row.value;
+      var group = document.getElementById(row.ident + '_group');
+      if (group) {
+        Array.prototype.forEach.call(group.children, function(b) {
+          b.classList.toggle('status-btn-active', b.getAttribute('data-value') === String(row.value));
+        });
+      }
     });
 
     (val.thermostats || []).forEach(function(t) {
-      var ist = document.getElementById(t.ident + '_soll');
-      if (ist && t.soll != null) ist.value = t.soll;
+      var dialRoot = dialRoots[t.ident + '_soll'];
+      if (dialRoot && t.soll != null) dialRoot._updateVisual(t.soll);
+      if (t.ist != null) setText(t.ident + '_ist', t.ist.toFixed(1).replace('.', ',') + ' °C');
+      if (t.humidity != null) setText(t.ident + '_humidity', t.humidity.toFixed(1).replace('.', ',') + ' %');
+      if (t.mode != null) updateModeButtons(t.ident + '_mode', t.mode);
     });
 
     if (val.humidity) {

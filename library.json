@@ -2,9 +2,9 @@
     "id": "{4DA50D0C-FCCE-40FC-9C3F-A6C6D7D4E3AE}",
     "author": "Martin Wilkens",
     "name": "Room Dashboard",
-    "description": "Generisches Raum-Dashboard fuer IP-Symcon: eine Instanz pro Raum, gleicher dunkler Kachel-Stil wie die anderen Dashboards. Feste optionale Widgets fuer Praesenz, Sonos (Player/Playlist/Gruppe/aktueller Titel) und Luftfeuchtigkeitsrechner, plus frei konfigurierbare Listen fuer Lichter (inkl. Hue/Govee-Auto-Erkennung fuer Dimmer/Farbe), Rolllaeden, Sensoren, Temperatur (Soll/Ist) und Status-Variablen -- jeder Raum hat so viele Eintraege wie er tatsaechlich braucht.",
-    "version": "1.3",
-    "build": 4,
-    "date": 1787608800,
+    "description": "Generisches Raum-Dashboard fuer IP-Symcon: eine Instanz pro Raum, gleicher dunkler Kachel-Stil wie die anderen Dashboards. Feste optionale Widgets fuer Praesenz, Sonos (Player/Playlist/Gruppe/aktueller Titel) und Luftfeuchtigkeitsrechner, plus frei konfigurierbare Listen fuer Lichter (inkl. Hue/Govee-Auto-Erkennung fuer Dimmer/Farbe), Rolllaeden, Sensoren, Temperatur (Dreh-Regler + Heizmodus, Thermostat-Knoten-Auto-Erkennung) und Status-Variablen (als Buttons) -- jeder Raum hat so viele Eintraege wie er tatsaechlich braucht.",
+    "version": "1.4",
+    "build": 5,
+    "date": 1787652000,
     "url": "https://github.com/mwilkens780/IPSymcon-RoomDashboard"
 }
