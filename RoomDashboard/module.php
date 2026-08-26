@@ -849,19 +849,48 @@ COLORLIGHT;
         return [round(60 + 45 * sin($rad), 1), round(60 - 45 * cos($rad), 1)];
     }
 
+    /** SVG arc path from the dial's start (frac=0) to the given fraction, for the colored progress stroke. */
+    private function dialArcPath(float $frac): string
+    {
+        $frac      = max(0, min(1, $frac));
+        $sweepDeg  = $frac * 270;
+        $endRad    = deg2rad(-135 + $sweepDeg);
+        $ex        = round(60 + 45 * sin($endRad), 1);
+        $ey        = round(60 - 45 * cos($endRad), 1);
+        $largeArc  = $sweepDeg > 180 ? 1 : 0;
+        return "M 28.2 91.8 A 45 45 0 {$largeArc} 1 {$ex} {$ey}";
+    }
+
+    /** Blue (cold/low) to red (hot/high) for the dial fraction, so it visibly shifts warmer as the target rises. */
+    private function dialColor(float $frac): string
+    {
+        $frac = max(0, min(1, $frac));
+        $cold = [63, 169, 245];
+        $hot  = [242, 85, 90];
+        $rgb  = [];
+        for ($i = 0; $i < 3; $i++) {
+            $rgb[$i] = (int) round($cold[$i] + ($hot[$i] - $cold[$i]) * $frac);
+        }
+        return sprintf('#%02x%02x%02x', $rgb[0], $rgb[1], $rgb[2]);
+    }
+
     private function renderThermoDial(string $ident, ?float $value): string
     {
         [$min, $max, $step] = self::THERMOSTAT_RANGE;
-        $val    = $value ?? $min;
+        $val     = $value ?? $min;
+        $frac    = $max > $min ? max(0, min(1, ($val - $min) / ($max - $min))) : 0;
         [$tx, $ty] = $this->dialThumbPos($val, $min, $max);
-        $valStr = $value !== null ? $this->fmtNum($value, 1) . '°' : '–';
+        $arcPath = $this->dialArcPath($frac);
+        $color   = $this->dialColor($frac);
+        $valStr  = $value !== null ? $this->fmtNum($value, 1) . '°' : '–';
 
         return "<div class=\"dial\" data-ident=\"{$ident}\" data-min=\"{$min}\" data-max=\"{$max}\" data-step=\"{$step}\" data-value=\"{$val}\">"
             . '<svg class="dial-svg" viewBox="0 0 120 120">'
             . '<path class="dial-track" d="M 28.2 91.8 A 45 45 0 1 1 91.8 91.8" fill="none" stroke="#1e2d40" stroke-width="8" stroke-linecap="round"/>'
-            . "<circle class=\"dial-thumb\" cx=\"{$tx}\" cy=\"{$ty}\" r=\"7\" fill=\"#7ec8f0\"/>"
+            . "<path class=\"dial-arc\" d=\"{$arcPath}\" fill=\"none\" stroke=\"{$color}\" stroke-width=\"8\" stroke-linecap=\"round\"/>"
+            . "<circle class=\"dial-thumb\" cx=\"{$tx}\" cy=\"{$ty}\" r=\"7\" fill=\"{$color}\"/>"
             . '</svg>'
-            . "<div class=\"dial-value\">{$valStr}</div>"
+            . "<div class=\"dial-center\"><span class=\"dial-value\" style=\"color:{$color}\">{$valStr}</span><span class=\"dial-caption\">Soll</span></div>"
             . '</div>';
     }
 
@@ -899,7 +928,7 @@ COLORLIGHT;
 
         return <<<THERMO
 <div class="thermo-tile">
-  <div class="light-name">🌡️ {$nameEsc}</div>
+  <div class="thermo-name">🌡️ {$nameEsc}</div>
   <div class="thermo-body">
     {$dial}
     <div class="thermo-stats">{$statsHtml}</div>
@@ -1098,13 +1127,19 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .sonos-btn-main{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-size:18px}
 .sonos-mute{margin-left:auto}
 .sonos-volume-row{display:flex;flex-direction:column;gap:4px}
-.thermo-stack{display:flex;flex-direction:column;gap:8px}
-.thermo-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
-.thermo-body{display:flex;align-items:center;gap:10px}
-.thermo-stats{display:flex;flex-direction:column;gap:6px;flex:1}
-.dial{display:flex;flex-direction:column;align-items:center;gap:2px;width:90px;flex:none;touch-action:none}
-.dial-svg{width:76px;height:76px;cursor:pointer}
-.dial-value{font-size:14px;font-weight:700;margin-top:-46px;pointer-events:none}
+.thermo-stack{display:flex;flex-direction:column;gap:10px}
+.thermo-tile{display:flex;flex-direction:column;gap:10px;background:linear-gradient(160deg,#15233a,#101c30);border-radius:14px;padding:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
+.thermo-name{font-size:12px;font-weight:600;color:#d0e8ff}
+.thermo-body{display:flex;align-items:center;gap:16px}
+.thermo-stats{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
+.dial{position:relative;width:96px;height:96px;flex:none;touch-action:none}
+.dial-svg{width:96px;height:96px;display:block;cursor:pointer}
+.dial-track{transition:stroke .2s}
+.dial-arc{transition:stroke .15s,d .15s}
+.dial-thumb{transition:fill .15s}
+.dial-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;pointer-events:none}
+.dial-value{font-size:17px;font-weight:700;transition:color .15s}
+.dial-caption{font-size:9px;color:#4a6a8a;text-transform:uppercase;letter-spacing:.05em}
 .mode-row{display:flex;gap:4px;flex-wrap:wrap}
 .mode-btn{flex:1;min-width:56px;background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;font-size:10px;padding:5px 2px;cursor:pointer}
 .mode-btn.mode-active{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-weight:700}
@@ -1161,6 +1196,8 @@ function statusVarSelect(ident, value, btn) {
 }
 
 var dialRoots = {};
+var DIAL_COLD = [63, 169, 245];
+var DIAL_HOT = [242, 85, 90];
 
 function valueToThumb(value, min, max) {
   var frac = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
@@ -1169,9 +1206,28 @@ function valueToThumb(value, min, max) {
   return { x: 60 + 45 * Math.sin(rad), y: 60 - 45 * Math.cos(rad) };
 }
 
+function dialColor(frac) {
+  frac = Math.max(0, Math.min(1, frac));
+  var r = Math.round(DIAL_COLD[0] + (DIAL_HOT[0] - DIAL_COLD[0]) * frac);
+  var g = Math.round(DIAL_COLD[1] + (DIAL_HOT[1] - DIAL_COLD[1]) * frac);
+  var b = Math.round(DIAL_COLD[2] + (DIAL_HOT[2] - DIAL_COLD[2]) * frac);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function dialArcPath(frac) {
+  frac = Math.max(0, Math.min(1, frac));
+  var sweepDeg = frac * 270;
+  var endRad = (-135 + sweepDeg) * Math.PI / 180;
+  var ex = (60 + 45 * Math.sin(endRad)).toFixed(1);
+  var ey = (60 - 45 * Math.cos(endRad)).toFixed(1);
+  var largeArc = sweepDeg > 180 ? 1 : 0;
+  return 'M 28.2 91.8 A 45 45 0 ' + largeArc + ' 1 ' + ex + ' ' + ey;
+}
+
 function initDial(root) {
   var svg = root.querySelector('.dial-svg');
   var thumb = root.querySelector('.dial-thumb');
+  var arc = root.querySelector('.dial-arc');
   var valueEl = root.querySelector('.dial-value');
   var min = parseFloat(root.dataset.min);
   var max = parseFloat(root.dataset.max);
@@ -1189,10 +1245,20 @@ function initDial(root) {
   }
 
   function updateVisual(value) {
+    var frac = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
     var pos = valueToThumb(value, min, max);
+    var color = dialColor(frac);
     thumb.setAttribute('cx', pos.x.toFixed(1));
     thumb.setAttribute('cy', pos.y.toFixed(1));
-    if (valueEl) valueEl.textContent = value.toFixed(1).replace('.', ',') + '°';
+    thumb.setAttribute('fill', color);
+    if (arc) {
+      arc.setAttribute('d', dialArcPath(frac));
+      arc.setAttribute('stroke', color);
+    }
+    if (valueEl) {
+      valueEl.textContent = value.toFixed(1).replace('.', ',') + '°';
+      valueEl.style.color = color;
+    }
   }
 
   function setFromClient(clientX, clientY) {
