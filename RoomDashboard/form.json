@@ -103,9 +103,30 @@
       "delete": true,
       "columns": [
         { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
-        { "caption": "Variable (Position 0-100)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+        { "caption": "Gerät (Position 0-100 oder TaHoma-Instanz)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectObject", "validObjectTypes": [1, 2] } }
       ],
       "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Bei TaHoma-Rollläden den Geräteknoten auswählen -- bidirektionale (mit Positions-Rückmeldung) bekommen Auf/Zu-Schnellwahl + Regler, unidirektionale (nur Auf/Stop/Zu, kein Rückkanal, z.B. RTS) automatisch nur die passenden Tasten. Bei einer einfachen Prozent-Variable (z.B. Homematic) wie gewohnt die Variable selbst wählen."
+    },
+    {
+      "type": "List",
+      "name": "automations",
+      "caption": "Automatisierung",
+      "rowCount": 3,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Variable (z.B. Systemvariable)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectVariable" } }
+      ],
+      "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Beliebige Variablen zum Schalten, z.B. eine Systemvariable für eine Lichtautomatisierung. Boolean-Variablen werden als Schalter dargestellt, Variablen mit Profil-Auswahlliste als Buttons."
     },
     {
       "type": "List",

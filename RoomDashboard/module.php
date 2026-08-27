@@ -26,6 +26,7 @@ class RoomDashboard extends IPSModule
         // anything similar without needing a dedicated slot for each one.
         $this->RegisterPropertyString('statusVars', '[]');
         $this->RegisterPropertyString('thermostats', '[]');
+        $this->RegisterPropertyString('automations', '[]');
 
         $this->RegisterTimer('UpdateTimer', 0, 'RMD_Refresh($_IPS[\'TARGET\']);');
 
@@ -46,12 +47,13 @@ class RoomDashboard extends IPSModule
         $sensors     = json_decode($this->ReadPropertyString('sensors'), true) ?: [];
         $statusVars  = json_decode($this->ReadPropertyString('statusVars'), true) ?: [];
         $thermostats = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
+        $automations = json_decode($this->ReadPropertyString('automations'), true) ?: [];
 
         $hasAnything = $this->ReadPropertyInteger('var_presence') > 0
             || $this->ReadPropertyInteger('sonos_instance') > 0
             || $this->ReadPropertyInteger('humidity_instance') > 0
             || count($lights) > 0 || count($shutters) > 0 || count($sensors) > 0
-            || count($statusVars) > 0 || count($thermostats) > 0;
+            || count($statusVars) > 0 || count($thermostats) > 0 || count($automations) > 0;
 
         if (!$hasAnything) {
             $this->SetStatus(201);
@@ -114,7 +116,12 @@ class RoomDashboard extends IPSModule
             }
 
             if (strpos($Ident, 'shutter_') === 0) {
-                $this->forwardListAction('shutters', (int) substr($Ident, strlen('shutter_')), $Value, $Ident);
+                // shutter_{index}_{control}, e.g. "shutter_0_position", "shutter_0_state"
+                $rest = substr($Ident, strlen('shutter_'));
+                $sep  = strpos($rest, '_');
+                if ($sep !== false) {
+                    $this->forwardShutterAction((int) substr($rest, 0, $sep), substr($rest, $sep + 1), $Value, $Ident);
+                }
                 return;
             }
 
@@ -130,6 +137,11 @@ class RoomDashboard extends IPSModule
                 if ($sep !== false) {
                     $this->forwardThermostatAction((int) substr($rest, 0, $sep), substr($rest, $sep + 1), $Value, $Ident);
                 }
+                return;
+            }
+
+            if (strpos($Ident, 'automation_') === 0) {
+                $this->forwardListAction('automations', (int) substr($Ident, strlen('automation_')), $Value, $Ident);
                 return;
             }
 
@@ -329,6 +341,47 @@ class RoomDashboard extends IPSModule
         $this->pushValue($pushIdent, $cast);
     }
 
+    /**
+     * TaHoma (Somfy) shutter idents: bidirectional covers expose a 0-100
+     * position (core_TargetClosureState, or core_ClosureState as a
+     * fallback for devices like Velux that don't report the target); RTS
+     * (unidirectional) covers have no position feedback at all and only
+     * support core_OpenClosedState with 'open'/'stop'/'closed'.
+     */
+    private const SHUTTER_POSITION_IDENTS = ['core_TargetClosureState', 'core_ClosureState'];
+    private const SHUTTER_STATE_IDENT     = 'core_OpenClosedState';
+    private const SHUTTER_MODULE_TAHOMA   = '{C3F89070-FE4D-A30A-C81F-B28131B32990}';
+
+    private function forwardShutterAction(int $index, string $control, $value, string $pushIdent): void
+    {
+        $rows = json_decode($this->ReadPropertyString('shutters'), true) ?: [];
+        if (!isset($rows[$index]['variable'])) {
+            return;
+        }
+        $nodeId = (int) $rows[$index]['variable'];
+        if ($nodeId <= 0) {
+            return;
+        }
+
+        $targetId = 0;
+        if (@IPS_InstanceExists($nodeId)) {
+            if ($control === 'position') {
+                $targetId = $this->firstVarIdByIdent($nodeId, self::SHUTTER_POSITION_IDENTS);
+            } elseif ($control === 'state') {
+                $targetId = $this->varIdByIdent($nodeId, self::SHUTTER_STATE_IDENT);
+            }
+        } elseif (@IPS_VariableExists($nodeId) && $control === 'position') {
+            $targetId = $nodeId;
+        }
+
+        if ($targetId <= 0) {
+            return;
+        }
+        $cast = $this->castToVarType($targetId, $value);
+        RequestAction($targetId, $cast);
+        $this->pushValue($pushIdent, $cast);
+    }
+
     /** Coerces a value coming from the browser (bool/string/number) to match the target variable's own type. */
     private function castToVarType(int $varId, $value)
     {
@@ -462,6 +515,7 @@ class RoomDashboard extends IPSModule
         $statusVars  = $this->collectStatusVars();
         $thermostats = $this->collectThermostats();
         $humidity    = $this->collectHumidity();
+        $automations = $this->collectAutomations();
 
         return [
             'roomName'    => $this->roomName(),
@@ -473,6 +527,7 @@ class RoomDashboard extends IPSModule
             'statusVars'  => $statusVars,
             'thermostats' => $thermostats,
             'humidity'    => $humidity,
+            'automations' => $automations,
             'updated'     => date('d.m. H:i'),
         ];
     }
@@ -601,17 +656,64 @@ class RoomDashboard extends IPSModule
     {
         $out = [];
         foreach (json_decode($this->ReadPropertyString('shutters'), true) ?: [] as $i => $row) {
-            $varId = (int) ($row['variable'] ?? 0);
-            if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+            $nodeId = (int) ($row['variable'] ?? 0);
+            if ($nodeId <= 0) {
                 continue;
             }
-            $out[] = [
-                'ident' => 'shutter_' . $i,
-                'name'  => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
-                'value' => (float) GetValue($varId),
-            ];
+            $nameOverride = ($row['name'] ?? '') !== '' ? $row['name'] : null;
+            $shutter = $this->buildShutter($nodeId, 'shutter_' . $i, $nameOverride);
+            if ($shutter !== null) {
+                $out[] = $shutter;
+            }
         }
         return $out;
+    }
+
+    /**
+     * Classifies a configured shutters-list node: a TaHoma device instance
+     * is either bidirectional (has a position ident -- percentage control)
+     * or unidirectional/RTS (only core_OpenClosedState -- open/stop/close
+     * only, no feedback); a plain 0-100 variable (e.g. Homematic actuator)
+     * is treated as bidirectional directly.
+     */
+    private function buildShutter(int $nodeId, string $ident, ?string $nameOverride): ?array
+    {
+        if (@IPS_InstanceExists($nodeId)) {
+            $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
+            if ($moduleId !== self::SHUTTER_MODULE_TAHOMA) {
+                return null;
+            }
+            $posId = $this->firstVarIdByIdent($nodeId, self::SHUTTER_POSITION_IDENTS);
+            if ($posId > 0) {
+                return [
+                    'ident' => $ident,
+                    'name'  => $nameOverride ?? $this->deviceName($nodeId),
+                    'kind'  => 'position',
+                    'value' => (float) $this->readVarById($posId),
+                ];
+            }
+            $stateId = $this->varIdByIdent($nodeId, self::SHUTTER_STATE_IDENT);
+            if ($stateId > 0) {
+                return [
+                    'ident' => $ident,
+                    'name'  => $nameOverride ?? $this->deviceName($nodeId),
+                    'kind'  => 'updown',
+                    'state' => (string) $this->readVarById($stateId),
+                ];
+            }
+            return null;
+        }
+
+        if (@IPS_VariableExists($nodeId)) {
+            return [
+                'ident' => $ident,
+                'name'  => $nameOverride ?? $this->deviceName($nodeId),
+                'kind'  => 'position',
+                'value' => (float) GetValue($nodeId),
+            ];
+        }
+
+        return null;
     }
 
     private function collectSensors(): array
@@ -647,6 +749,35 @@ class RoomDashboard extends IPSModule
                 'name'    => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
                 'value'   => (string) GetValue($varId),
                 'options' => $this->variableAssociations($varId),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Arbitrary variables to switch/toggle per room -- e.g. a system
+     * variable that enables/disables a light automation. A plain Boolean
+     * with no value profile renders as a toggle switch; anything with
+     * profile associations reuses the same button-group as status
+     * variables; anything else falls back to a read-only value.
+     */
+    private function collectAutomations(): array
+    {
+        $out = [];
+        foreach (json_decode($this->ReadPropertyString('automations'), true) ?: [] as $i => $row) {
+            $varId = (int) ($row['variable'] ?? 0);
+            if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+                continue;
+            }
+            $options = $this->variableAssociations($varId);
+            $isBool  = (int) IPS_GetVariable($varId)['VariableType'] === 0;
+            $out[] = [
+                'ident'   => 'automation_' . $i,
+                'name'    => ($row['name'] ?? '') !== '' ? $row['name'] : $this->deviceName($varId),
+                'isBool'  => $isBool && count($options) === 0,
+                'on'      => $isBool ? (bool) GetValue($varId) : null,
+                'value'   => (string) GetValue($varId),
+                'options' => $options,
             ];
         }
         return $out;
@@ -793,11 +924,51 @@ COLORLIGHT;
     {
         $nameEsc = htmlspecialchars($shutter['name'], ENT_QUOTES);
         $ident   = $shutter['ident'];
-        $val     = (int) round($shutter['value']);
-        return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-            . "<input id=\"{$ident}_range\" type=\"range\" min=\"0\" max=\"100\" value=\"{$val}\" class=\"light-slider\" "
-            . "oninput=\"document.getElementById('{$ident}_val').textContent=this.value+'%'\" onchange=\"requestAction('{$ident}', parseInt(this.value))\">"
-            . "<span id=\"{$ident}_val\" class=\"light-value\">{$val}%</span></div>";
+
+        if ($shutter['kind'] === 'updown') {
+            // No position feedback exists for RTS/unidirectional covers --
+            // only open/stop/close actions, no slider.
+            return <<<UPDOWN
+<div class="shutter-tile">
+  <span class="light-name">{$nameEsc}</span>
+  <div class="shutter-btns">
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_state', 'open')">▲ Auf</button>
+    <button type="button" class="shutter-btn shutter-btn-stop" onclick="requestAction('{$ident}_state', 'stop')">■</button>
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_state', 'closed')">▼ Zu</button>
+  </div>
+</div>
+UPDOWN;
+        }
+
+        $val = (int) round($shutter['value']);
+        return <<<POSITION
+<div class="shutter-tile">
+  <div class="shutter-head">
+    <span class="light-name">{$nameEsc}</span>
+    <span id="{$ident}_val" class="light-value">{$val}% zu</span>
+  </div>
+  <div class="shutter-btns">
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_position', 0)">▲ Auf</button>
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_position', 100)">▼ Zu</button>
+  </div>
+  <input id="{$ident}_range" type="range" min="0" max="100" value="{$val}" class="light-slider"
+    oninput="document.getElementById('{$ident}_val').textContent=this.value+'% zu'" onchange="requestAction('{$ident}_position', parseInt(this.value))">
+</div>
+POSITION;
+    }
+
+    private function renderAutomationTile(array $a): string
+    {
+        if ($a['isBool']) {
+            $nameEsc = htmlspecialchars($a['name'], ENT_QUOTES);
+            $ident   = $a['ident'];
+            $checked = $a['on'] ? ' checked' : '';
+            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
+                . "<label class=\"toggle\"><input id=\"{$ident}_input\" type=\"checkbox\"{$checked} onchange=\"requestAction('{$ident}', this.checked)\">"
+                . '<span class="toggle-track"><span class="toggle-thumb"></span></span></label></div>';
+        }
+        // Reuses the exact same button-group/read-only rendering as status variables.
+        return $this->renderStatusVarTile($a);
     }
 
     private function renderSensorTile(array $sensor): string
@@ -1059,6 +1230,14 @@ SONOS;
             ? '<div class="pv-block"><div class="pv-title">🔧 Status</div>' . $presenceHtml . '<div class="tile-grid">' . $statusVarsHtml . '</div></div>'
             : '';
 
+        $automationsHtml = '';
+        foreach ($d['automations'] as $a) {
+            $automationsHtml .= $this->renderAutomationTile($a);
+        }
+        $automationsBlock = $automationsHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">⚙️ Automatisierung</div><div class="tile-grid">' . $automationsHtml . '</div></div>'
+            : '';
+
         $thermoHtml = '';
         foreach ($d['thermostats'] as $t) {
             $thermoHtml .= $this->renderThermostatTile($t);
@@ -1168,6 +1347,11 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .status-btn-group{display:flex;flex-wrap:wrap;gap:4px}
 .status-btn{background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer}
 .status-btn-active{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
+.shutter-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:6px 8px}
+.shutter-head{display:flex;justify-content:space-between;align-items:center}
+.shutter-btns{display:flex;gap:6px}
+.shutter-btn{flex:1;background:#1a2535;border:1px solid #2a3a50;color:#d0e8ff;border-radius:6px;font-size:11px;padding:6px 4px;cursor:pointer}
+.shutter-btn-stop{flex:0 0 34px;color:#f08060}
 </style>
 </head>
 <body>
@@ -1178,6 +1362,7 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 {$thermoBlock}
 {$humidityBlock}
 {$statusVarsBlock}
+{$automationsBlock}
 {$sonosBlock}
 {$lightsBlock}
 {$shuttersBlock}
@@ -1394,10 +1579,22 @@ window.handleMessage = function(raw) {
     });
 
     (val.shutters || []).forEach(function(shutter) {
+      if (shutter.kind !== 'position' || shutter.value == null) return;
       var range = document.getElementById(shutter.ident + '_range');
       var lbl = document.getElementById(shutter.ident + '_val');
       if (range) range.value = Math.round(shutter.value);
-      if (lbl) lbl.textContent = Math.round(shutter.value) + '%';
+      if (lbl) lbl.textContent = Math.round(shutter.value) + '% zu';
+    });
+
+    (val.automations || []).forEach(function(a) {
+      var input = document.getElementById(a.ident + '_input');
+      if (input && a.on != null) input.checked = a.on;
+      var group = document.getElementById(a.ident + '_group');
+      if (group) {
+        Array.prototype.forEach.call(group.children, function(b) {
+          b.classList.toggle('status-btn-active', b.getAttribute('data-value') === String(a.value));
+        });
+      }
     });
   }
 };
