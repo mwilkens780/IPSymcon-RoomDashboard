@@ -280,8 +280,8 @@ class RoomDashboard extends IPSModule
      * device generations; the first one that resolves on the configured
      * node wins.
      */
-    private const THERMOSTAT_SET_IDENTS    = ['SET_POINT_TEMPERATURE', 'SETPOINT'];
-    private const THERMOSTAT_ACTUAL_IDENTS = ['ACTUAL_TEMPERATURE'];
+    private const THERMOSTAT_SET_IDENTS    = ['SET_TEMPERATURE', 'SET_POINT_TEMPERATURE', 'SETPOINT'];
+    private const THERMOSTAT_ACTUAL_IDENTS = ['ACTUAL_TEMPERATURE', 'TEMPERATURE'];
     private const THERMOSTAT_MODE_IDENTS   = ['CONTROL_MODE', 'SET_POINT_MODE'];
     private const THERMOSTAT_RANGE         = [5.0, 30.0, 0.5];
 
@@ -917,9 +917,11 @@ COLORLIGHT;
 
     private function renderThermostatTile(array $t): string
     {
-        $nameEsc = htmlspecialchars($t['name'], ENT_QUOTES);
-        $ident   = $t['ident'];
-        $dial    = $this->renderThermoDial($ident . '_soll', $t['soll']);
+        // Deliberately no device/node name header here: the underlying
+        // Homematic channel name is an implementation detail, not
+        // something the room-level "Temperatur" section should surface.
+        $ident = $t['ident'];
+        $dial  = $this->renderThermoDial($ident . '_soll', $t['soll']);
 
         $statsHtml = '';
         if ($t['ist'] !== null) {
@@ -932,7 +934,6 @@ COLORLIGHT;
 
         return <<<THERMO
 <div class="thermo-tile">
-  <div class="thermo-name">🌡️ {$nameEsc}</div>
   <div class="thermo-body">
     {$dial}
     <div class="thermo-stats">{$statsHtml}</div>
@@ -948,30 +949,31 @@ THERMO;
             return '';
         }
 
-        $sensorHtml = $humidity['sensor'] !== null
-            ? $this->renderStatTile('humidity_sensor', 'Luftfeuchtigkeit', $this->fmtNum($humidity['sensor'], 1) . ' %')
-            : '';
+        // Sensor value and dew points are peers, shown side by side in the
+        // same grid, whether or not a calculator instance is configured.
+        $gridTiles = '';
+        if ($humidity['sensor'] !== null) {
+            $gridTiles .= $this->renderStatTile('humidity_sensor', 'Luftfeuchtigkeit', $this->fmtNum($humidity['sensor'], 1) . ' %');
+        }
+        if ($humidity['hasCalc'] && ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null)) {
+            $gridTiles .= $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C');
+            $gridTiles .= $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C');
+        }
+        $gridHtml = $gridTiles !== '' ? "<div class=\"current-grid\">{$gridTiles}</div>" : '';
 
-        $calcHtml = '';
+        $calcTextHtml = '';
         if ($humidity['hasCalc']) {
             $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
             $hintBadge = $this->renderStatusBadge('humidity_hint', 'Lüften empfohlen', $humidity['hint'], true);
-            $dewHtml = '';
-            if ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null) {
-                $dewHtml = '<div class="current-grid">'
-                    . $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C')
-                    . $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C')
-                    . '</div>';
-            }
-            $calcHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>"
-                . "<div class=\"status-row\">{$hintBadge}</div>{$dewHtml}";
+            $calcTextHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>"
+                . "<div class=\"status-row\">{$hintBadge}</div>";
         }
 
         return <<<HUMID
 <div class="pv-block">
   <div class="pv-title">💧 Luftfeuchtigkeit</div>
-  {$sensorHtml}
-  {$calcHtml}
+  {$calcTextHtml}
+  {$gridHtml}
 </div>
 HUMID;
     }
