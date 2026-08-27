@@ -654,18 +654,6 @@ class RoomDashboard extends IPSModule
 
     private function collectThermostats(): array
     {
-        // Reuse the room's own humidity sensor (from the generic sensors
-        // list) inside the thermostat tile too, instead of asking for it
-        // to be configured a second time -- a room only ever has the one
-        // ambient reading regardless of how many thermostats it has.
-        $humidity = null;
-        foreach ($this->collectSensors() as $sensor) {
-            if ($sensor['type'] === 'humidity') {
-                $humidity = $sensor['value'];
-                break;
-            }
-        }
-
         $out = [];
         foreach (json_decode($this->ReadPropertyString('thermostats'), true) ?: [] as $i => $row) {
             $nodeId = (int) ($row['node'] ?? 0);
@@ -692,7 +680,6 @@ class RoomDashboard extends IPSModule
                 'ist'         => $istId > 0 ? (float) $this->readVarById($istId) : null,
                 'mode'        => $modeId > 0 ? (string) $this->readVarById($modeId) : null,
                 'modeOptions' => $modeId > 0 ? $this->variableAssociations($modeId) : [],
-                'humidity'    => $humidity,
             ];
         }
         return $out;
@@ -700,20 +687,40 @@ class RoomDashboard extends IPSModule
 
     private function collectHumidity(): ?array
     {
-        $humId = $this->ReadPropertyInteger('humidity_instance');
-        if ($humId <= 0 || !@IPS_InstanceExists($humId)) {
+        $humId   = $this->ReadPropertyInteger('humidity_instance');
+        $hasCalc = $humId > 0 && @IPS_InstanceExists($humId);
+
+        // The room's own humidity sensor (from the generic sensors list)
+        // belongs here rather than nested inside the thermostat tile -- a
+        // room only ever has the one ambient reading regardless of how
+        // many thermostats it has.
+        $sensorHumidity = null;
+        foreach ($this->collectSensors() as $sensor) {
+            if ($sensor['type'] === 'humidity') {
+                $sensorHumidity = $sensor['value'];
+                break;
+            }
+        }
+
+        if (!$hasCalc && $sensorHumidity === null) {
             return null;
         }
-        $hintId   = $this->varIdByIdent($humId, 'Hint');
-        $resultId = $this->varIdByIdent($humId, 'Result');
-        $dpOutId  = $this->varIdByIdent($humId, 'DewPointOutdoor');
-        $dpInId   = $this->varIdByIdent($humId, 'DewPointIndoor');
+
+        $hintId = $resultId = $dpOutId = $dpInId = 0;
+        if ($hasCalc) {
+            $hintId   = $this->varIdByIdent($humId, 'Hint');
+            $resultId = $this->varIdByIdent($humId, 'Result');
+            $dpOutId  = $this->varIdByIdent($humId, 'DewPointOutdoor');
+            $dpInId   = $this->varIdByIdent($humId, 'DewPointIndoor');
+        }
 
         return [
+            'hasCalc'     => $hasCalc,
             'hint'        => $hintId > 0 ? (bool) $this->readVarById($hintId) : null,
             'result'      => $resultId > 0 ? (string) $this->readVarById($resultId) : '',
             'dewPointOut' => $dpOutId > 0 ? (float) $this->readVarById($dpOutId) : null,
             'dewPointIn'  => $dpInId > 0 ? (float) $this->readVarById($dpInId) : null,
+            'sensor'      => $sensorHumidity,
         ];
     }
 
@@ -918,9 +925,6 @@ COLORLIGHT;
         if ($t['ist'] !== null) {
             $statsHtml .= $this->renderStatTile($ident . '_ist', 'Ist', $this->fmtNum($t['ist'], 1) . ' °C');
         }
-        if ($t['humidity'] !== null) {
-            $statsHtml .= $this->renderStatTile($ident . '_humidity', 'Feuchtigkeit', $this->fmtNum($t['humidity'], 1) . ' %');
-        }
 
         $modeHtml = count($t['modeOptions']) > 0
             ? $this->renderModeButtons($ident . '_mode', $t['modeOptions'], $t['mode'])
@@ -943,21 +947,31 @@ THERMO;
         if ($humidity === null) {
             return '';
         }
-        $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
-        $hintBadge = $this->renderStatusBadge('humidity_hint', 'Lüften empfohlen', $humidity['hint'], true);
-        $dewHtml = '';
-        if ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null) {
-            $dewHtml = '<div class="current-grid">'
-                . $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C')
-                . $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C')
-                . '</div>';
+
+        $sensorHtml = $humidity['sensor'] !== null
+            ? $this->renderStatTile('humidity_sensor', 'Luftfeuchtigkeit', $this->fmtNum($humidity['sensor'], 1) . ' %')
+            : '';
+
+        $calcHtml = '';
+        if ($humidity['hasCalc']) {
+            $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
+            $hintBadge = $this->renderStatusBadge('humidity_hint', 'Lüften empfohlen', $humidity['hint'], true);
+            $dewHtml = '';
+            if ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null) {
+                $dewHtml = '<div class="current-grid">'
+                    . $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C')
+                    . $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C')
+                    . '</div>';
+            }
+            $calcHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>"
+                . "<div class=\"status-row\">{$hintBadge}</div>{$dewHtml}";
         }
+
         return <<<HUMID
 <div class="pv-block">
   <div class="pv-title">💧 Luftfeuchtigkeit</div>
-  <span id="humidity_result" class="humidity-result">{$resultEsc}</span>
-  <div class="status-row">{$hintBadge}</div>
-  {$dewHtml}
+  {$sensorHtml}
+  {$calcHtml}
 </div>
 HUMID;
     }
@@ -1033,13 +1047,14 @@ SONOS;
         $d = $this->collectData();
 
         $presenceBadge = $this->renderStatusBadge('presence_badge', '🧍 Präsenz', $d['presence']);
+        $presenceHtml  = $presenceBadge !== '' ? "<div class=\"status-row\">{$presenceBadge}</div>" : '';
 
         $statusVarsHtml = '';
         foreach ($d['statusVars'] as $row) {
             $statusVarsHtml .= $this->renderStatusVarTile($row);
         }
-        $statusVarsBlock = $statusVarsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div><div class="tile-grid">' . $statusVarsHtml . '</div></div>'
+        $statusVarsBlock = ($statusVarsHtml !== '' || $presenceHtml !== '')
+            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div>' . $presenceHtml . '<div class="tile-grid">' . $statusVarsHtml . '</div></div>'
             : '';
 
         $thermoHtml = '';
@@ -1157,8 +1172,6 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 <div class="header">
   <span>🏠 {$roomNameEsc} <span id="updated" class="updated">Stand {$updatedEsc}</span></span>
 </div>
-
-<div class="status-row">{$presenceBadge}</div>
 
 {$thermoBlock}
 {$humidityBlock}
@@ -1329,11 +1342,11 @@ window.handleMessage = function(raw) {
       var dialRoot = dialRoots[t.ident + '_soll'];
       if (dialRoot && t.soll != null) dialRoot._updateVisual(t.soll);
       if (t.ist != null) setText(t.ident + '_ist', t.ist.toFixed(1).replace('.', ',') + ' °C');
-      if (t.humidity != null) setText(t.ident + '_humidity', t.humidity.toFixed(1).replace('.', ',') + ' %');
       if (t.mode != null) updateModeButtons(t.ident + '_mode', t.mode);
     });
 
     if (val.humidity) {
+      if (val.humidity.sensor != null) setText('humidity_sensor', val.humidity.sensor.toFixed(1).replace('.', ',') + ' %');
       setText('humidity_result', val.humidity.result || '–');
       setText('humidity_dp_out', val.humidity.dewPointOut != null ? val.humidity.dewPointOut.toFixed(1).replace('.', ',') + ' °C' : '–');
       setText('humidity_dp_in', val.humidity.dewPointIn != null ? val.humidity.dewPointIn.toFixed(1).replace('.', ',') + ' °C' : '–');
