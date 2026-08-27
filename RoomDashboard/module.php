@@ -105,6 +105,11 @@ class RoomDashboard extends IPSModule
                 return;
             }
 
+            if ($Ident === 'lights_all') {
+                $this->forwardAllLightsAction((bool) $Value);
+                return;
+            }
+
             if (strpos($Ident, 'light_') === 0) {
                 // light_{index}_{control}, e.g. "light_0_on", "light_0_brightness", "light_0_color"
                 $rest = substr($Ident, strlen('light_'));
@@ -262,15 +267,22 @@ class RoomDashboard extends IPSModule
         if (@IPS_InstanceExists($nodeId)) {
             $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
             $idents   = self::LIGHT_MODULE_IDENTS[$moduleId] ?? null;
-            if ($idents === null) {
-                return;
+            if ($idents !== null) {
+                [$onIdent, $brightIdent, $colorIdent] = $idents;
+                $identMap = ['on' => $onIdent, 'brightness' => $brightIdent, 'color' => $colorIdent];
+                if (isset($identMap[$control])) {
+                    $targetId = $this->varIdByIdent($nodeId, $identMap[$control]);
+                }
             }
-            [$onIdent, $brightIdent, $colorIdent] = $idents;
-            $identMap = ['on' => $onIdent, 'brightness' => $brightIdent, 'color' => $colorIdent];
-            if (!isset($identMap[$control])) {
-                return;
+            // Unrecognised instance type (e.g. a Homematic channel selected
+            // as the node instead of its raw variable): fall back to the
+            // classic Homematic switch/dimmer idents.
+            if ($targetId <= 0 && $control === 'on') {
+                $targetId = $this->varIdByIdent($nodeId, 'STATE');
             }
-            $targetId = $this->varIdByIdent($nodeId, $identMap[$control]);
+            if ($targetId <= 0 && $control === 'brightness') {
+                $targetId = $this->varIdByIdent($nodeId, 'LEVEL');
+            }
         } elseif (@IPS_VariableExists($nodeId)) {
             // Plain switch/dimmer variable: on/off and brightness both act
             // on the same single variable (only one control is ever
@@ -284,6 +296,32 @@ class RoomDashboard extends IPSModule
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
         $this->pushValue($pushIdent, $cast);
+    }
+
+    /**
+     * Master switch for the whole Lichter section: turns every configured
+     * light on/off regardless of kind or manufacturer. Dimmer-only lights
+     * (no separate on/off control) are driven via brightness 0/100 instead.
+     */
+    private function forwardAllLightsAction(bool $on): void
+    {
+        $rows = json_decode($this->ReadPropertyString('lights'), true) ?: [];
+        foreach ($rows as $i => $row) {
+            $nodeId = (int) ($row['variable'] ?? 0);
+            if ($nodeId <= 0) {
+                continue;
+            }
+            $light = $this->buildLight($nodeId, 'light_' . $i, null);
+            if ($light === null) {
+                continue;
+            }
+            if ($light['kind'] === 'dimmer') {
+                $this->forwardLightAction($i, 'brightness', $on ? 100 : 0, 'light_' . $i . '_brightness');
+            } else {
+                $this->forwardLightAction($i, 'on', $on, 'light_' . $i . '_on');
+            }
+        }
+        $this->pushValue('lights_all', $on);
     }
 
     /**
@@ -616,24 +654,36 @@ class RoomDashboard extends IPSModule
         if (@IPS_InstanceExists($nodeId)) {
             $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
             $idents   = self::LIGHT_MODULE_IDENTS[$moduleId] ?? null;
-            if ($idents === null) {
-                return null;
+            if ($idents !== null) {
+                [$onIdent, $brightIdent, $colorIdent] = $idents;
+                $onId     = $this->varIdByIdent($nodeId, $onIdent);
+                $brightId = $this->varIdByIdent($nodeId, $brightIdent);
+                $colorId  = $this->varIdByIdent($nodeId, $colorIdent);
+                if ($onId > 0) {
+                    return [
+                        'ident'      => $ident,
+                        'name'       => $nameOverride ?? $this->deviceName($nodeId),
+                        'kind'       => $colorId > 0 ? 'color' : ($brightId > 0 ? 'dimmer' : 'switch'),
+                        'on'         => (bool) $this->readVarById($onId),
+                        'brightness' => $brightId > 0 ? (float) $this->readVarById($brightId) : null,
+                        'color'      => $colorId > 0 ? (int) $this->readVarById($colorId) : null,
+                    ];
+                }
             }
-            [$onIdent, $brightIdent, $colorIdent] = $idents;
-            $onId     = $this->varIdByIdent($nodeId, $onIdent);
-            $brightId = $this->varIdByIdent($nodeId, $brightIdent);
-            $colorId  = $this->varIdByIdent($nodeId, $colorIdent);
-            if ($onId <= 0) {
-                return null;
+
+            // Unrecognised instance type (e.g. a Homematic channel selected
+            // as the node instead of its raw variable): fall back to the
+            // classic Homematic switch/dimmer idents, same as the light
+            // manufacturer classifiers above.
+            $switchId = $this->varIdByIdent($nodeId, 'STATE');
+            if ($switchId > 0) {
+                return $this->buildLight($switchId, $ident, $nameOverride);
             }
-            return [
-                'ident'      => $ident,
-                'name'       => $nameOverride ?? $this->deviceName($nodeId),
-                'kind'       => $colorId > 0 ? 'color' : ($brightId > 0 ? 'dimmer' : 'switch'),
-                'on'         => (bool) $this->readVarById($onId),
-                'brightness' => $brightId > 0 ? (float) $this->readVarById($brightId) : null,
-                'color'      => $colorId > 0 ? (int) $this->readVarById($colorId) : null,
-            ];
+            $levelId = $this->varIdByIdent($nodeId, 'LEVEL');
+            if ($levelId > 0) {
+                return $this->buildLight($levelId, $ident, $nameOverride);
+            }
+            return null;
         }
 
         if (@IPS_VariableExists($nodeId)) {
@@ -1254,8 +1304,16 @@ SONOS;
         foreach ($d['lights'] as $light) {
             $lightsHtml .= $this->renderLightTile($light);
         }
+        $allLightsOn = count($d['lights']) > 0 && array_reduce($d['lights'], static function (bool $carry, array $l): bool {
+            $isOn = $l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) ($l['on'] ?? false);
+            return $carry && $isOn;
+        }, true);
+        $allLightsToggle = count($d['lights']) > 1
+            ? '<label class="toggle"><input id="lights_all_input" type="checkbox"' . ($allLightsOn ? ' checked' : '')
+                . ' onchange="requestAction(\'lights_all\', this.checked)"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>'
+            : '';
         $lightsBlock = $lightsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">💡 Lichter</div><div class="tile-grid">' . $lightsHtml . '</div></div>'
+            ? '<div class="pv-block"><div class="pv-title pv-title-row"><span>💡 Lichter</span>' . $allLightsToggle . '</div><div class="tile-grid">' . $lightsHtml . '</div></div>'
             : '';
 
         $shuttersHtml = '';
@@ -1301,6 +1359,7 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .cur-value{font-size:15px;font-weight:700;color:#d0e8ff}
 .pv-block{display:flex;flex-direction:column;gap:8px;flex:none;background:#0f1c30;border-radius:10px;padding:8px}
 .pv-title{font-size:12px;font-weight:700;color:#d0e8ff}
+.pv-title-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .mode-select{width:100%;background:#131f33;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:6px 8px;font-size:12px}
 .light-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
 .light-name{font-size:11px;color:#8aa8c8}
@@ -1577,6 +1636,14 @@ window.handleMessage = function(raw) {
       var colorInput = document.getElementById(light.ident + '_color_input');
       if (colorInput && light.color != null) colorInput.value = '#' + ('000000' + light.color.toString(16)).slice(-6);
     });
+
+    var allLightsInput = document.getElementById('lights_all_input');
+    if (allLightsInput && val.lights && val.lights.length > 0) {
+      var allOn = val.lights.every(function(l) {
+        return l.kind === 'dimmer' ? (l.brightness > 0) : !!l.on;
+      });
+      allLightsInput.checked = allOn;
+    }
 
     (val.shutters || []).forEach(function(shutter) {
       if (shutter.kind !== 'position' || shutter.value == null) return;
