@@ -27,6 +27,7 @@ class RoomDashboard extends IPSModule
         $this->RegisterPropertyString('statusVars', '[]');
         $this->RegisterPropertyString('thermostats', '[]');
         $this->RegisterPropertyString('automations', '[]');
+        $this->RegisterPropertyString('smokeDetectors', '[]');
 
         $this->RegisterTimer('UpdateTimer', 0, 'RMD_Refresh($_IPS[\'TARGET\']);');
 
@@ -48,12 +49,14 @@ class RoomDashboard extends IPSModule
         $statusVars  = json_decode($this->ReadPropertyString('statusVars'), true) ?: [];
         $thermostats = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
         $automations = json_decode($this->ReadPropertyString('automations'), true) ?: [];
+        $smokeDetectors = json_decode($this->ReadPropertyString('smokeDetectors'), true) ?: [];
 
         $hasAnything = $this->ReadPropertyInteger('var_presence') > 0
             || $this->ReadPropertyInteger('sonos_instance') > 0
             || $this->ReadPropertyInteger('humidity_instance') > 0
             || count($lights) > 0 || count($shutters) > 0 || count($sensors) > 0
-            || count($statusVars) > 0 || count($thermostats) > 0 || count($automations) > 0;
+            || count($statusVars) > 0 || count($thermostats) > 0 || count($automations) > 0
+            || count($smokeDetectors) > 0;
 
         if (!$hasAnything) {
             $this->SetStatus(201);
@@ -554,19 +557,21 @@ class RoomDashboard extends IPSModule
         $thermostats = $this->collectThermostats();
         $humidity    = $this->collectHumidity();
         $automations = $this->collectAutomations();
+        $smokeDetectors = $this->collectSmokeDetectors();
 
         return [
-            'roomName'    => $this->roomName(),
-            'presence'    => $presence,
-            'sonos'       => $sonos,
-            'lights'      => $lights,
-            'shutters'    => $shutters,
-            'sensors'     => $sensors,
-            'statusVars'  => $statusVars,
-            'thermostats' => $thermostats,
-            'humidity'    => $humidity,
-            'automations' => $automations,
-            'updated'     => date('d.m. H:i'),
+            'roomName'       => $this->roomName(),
+            'presence'       => $presence,
+            'sonos'          => $sonos,
+            'lights'         => $lights,
+            'shutters'       => $shutters,
+            'sensors'        => $sensors,
+            'statusVars'     => $statusVars,
+            'thermostats'    => $thermostats,
+            'humidity'       => $humidity,
+            'automations'    => $automations,
+            'smokeDetectors' => $smokeDetectors,
+            'updated'        => date('d.m. H:i'),
         ];
     }
 
@@ -833,6 +838,92 @@ class RoomDashboard extends IPSModule
         return $out;
     }
 
+    /**
+     * Rauchmelder: either a Nest Protect instance (own module, GUID below --
+     * read-only Smoke/CO/Heat/Battery/Wired/Hushed/LastTest/ReplaceBy
+     * variables) or a Homematic smoke-detector channel (verified live:
+     * ident SMOKE_DETECTOR_ALARM_STATUS, Integer, 0 = OK / != 0 = alarm),
+     * or a plain variable pointed at directly.
+     */
+    private const NEST_PROTECT_MODULE  = '{8A2725A7-390A-4F9A-A9E9-A18CA10E537D}';
+    private const SMOKE_ALARM_IDENTS   = ['SMOKE_DETECTOR_ALARM_STATUS', 'STATE'];
+
+    private function collectSmokeDetectors(): array
+    {
+        $out = [];
+        foreach (json_decode($this->ReadPropertyString('smokeDetectors'), true) ?: [] as $i => $row) {
+            $nodeId = (int) ($row['variable'] ?? 0);
+            if ($nodeId <= 0) {
+                continue;
+            }
+            $nameOverride = ($row['name'] ?? '') !== '' ? $row['name'] : null;
+            $detector = $this->buildSmokeDetector($nodeId, 'smoke_' . $i, $nameOverride);
+            if ($detector !== null) {
+                $out[] = $detector;
+            }
+        }
+        return $out;
+    }
+
+    private function buildSmokeDetector(int $nodeId, string $ident, ?string $nameOverride): ?array
+    {
+        if (@IPS_InstanceExists($nodeId)) {
+            $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
+            if ($moduleId === self::NEST_PROTECT_MODULE) {
+                $smokeId = $this->varIdByIdent($nodeId, 'Smoke');
+                if ($smokeId <= 0) {
+                    return null;
+                }
+                $coId       = $this->varIdByIdent($nodeId, 'CO');
+                $heatId     = $this->varIdByIdent($nodeId, 'Heat');
+                $batteryId  = $this->varIdByIdent($nodeId, 'Battery');
+                $wiredId    = $this->varIdByIdent($nodeId, 'Wired');
+                $hushedId   = $this->varIdByIdent($nodeId, 'Hushed');
+                $lastTestId = $this->varIdByIdent($nodeId, 'LastTest');
+                $replaceId  = $this->varIdByIdent($nodeId, 'ReplaceBy');
+                return [
+                    'ident'     => $ident,
+                    'name'      => $nameOverride ?? $this->deviceName($nodeId),
+                    'kind'      => 'nest',
+                    'smoke'     => (bool) $this->readVarById($smokeId),
+                    'co'        => $coId > 0 ? (bool) $this->readVarById($coId) : null,
+                    'heat'      => $heatId > 0 ? (bool) $this->readVarById($heatId) : null,
+                    'battery'   => $batteryId > 0 ? (int) $this->readVarById($batteryId) : null,
+                    'wired'     => $wiredId > 0 ? (bool) $this->readVarById($wiredId) : null,
+                    'hushed'    => $hushedId > 0 ? (bool) $this->readVarById($hushedId) : null,
+                    'lastTest'  => $lastTestId > 0 ? (int) $this->readVarById($lastTestId) : null,
+                    'replaceBy' => $replaceId > 0 ? (int) $this->readVarById($replaceId) : null,
+                ];
+            }
+
+            // Unrecognised instance (e.g. a Homematic smoke-detector channel
+            // selected as the node): fall back to the classic alarm-status ident.
+            $alarmId = $this->firstVarIdByIdent($nodeId, self::SMOKE_ALARM_IDENTS);
+            if ($alarmId <= 0) {
+                return null;
+            }
+            return [
+                'ident' => $ident,
+                'name'  => $nameOverride ?? $this->deviceName($nodeId),
+                'kind'  => 'generic',
+                'alarm' => (int) $this->readVarById($alarmId) !== 0,
+            ];
+        }
+
+        if (@IPS_VariableExists($nodeId)) {
+            $isBool = (int) IPS_GetVariable($nodeId)['VariableType'] === 0;
+            $raw    = $this->readVarById($nodeId);
+            return [
+                'ident' => $ident,
+                'name'  => $nameOverride ?? $this->deviceName($nodeId),
+                'kind'  => 'generic',
+                'alarm' => $isBool ? (bool) $raw : ((int) $raw !== 0),
+            ];
+        }
+
+        return null;
+    }
+
     private function collectThermostats(): array
     {
         $out = [];
@@ -1019,6 +1110,61 @@ POSITION;
         }
         // Reuses the exact same button-group/read-only rendering as status variables.
         return $this->renderStatusVarTile($a);
+    }
+
+    private function renderAlarmBadge(string $label, bool $active): string
+    {
+        $cls  = $active ? 'badge-warn' : 'badge-off';
+        $text = htmlspecialchars($label . ': ' . ($active ? 'Alarm' : 'OK'), ENT_QUOTES);
+        return "<span class=\"badge {$cls}\">{$text}</span>";
+    }
+
+    private function renderSmokeDetectorTile(array $d): string
+    {
+        $nameEsc = htmlspecialchars($d['name'], ENT_QUOTES);
+
+        if ($d['kind'] !== 'nest') {
+            return "<div class=\"light-tile\"><span class=\"light-name\">🚨 {$nameEsc}</span>"
+                . $this->renderAlarmBadge('Alarm', $d['alarm']) . '</div>';
+        }
+
+        $badges = $this->renderAlarmBadge('Rauch', $d['smoke']);
+        if ($d['co'] !== null) {
+            $badges .= $this->renderAlarmBadge('CO', $d['co']);
+        }
+        if ($d['heat'] !== null) {
+            $badges .= $this->renderAlarmBadge('Hitze', $d['heat']);
+        }
+        if ($d['hushed'] === true) {
+            $badges .= '<span class="badge badge-warn">Stummgeschaltet</span>';
+        }
+
+        $statsHtml = '';
+        if ($d['battery'] !== null) {
+            $statsHtml .= $this->renderStatTile('', 'Batterie', $d['battery'] . ' %');
+        }
+        if ($d['wired'] !== null) {
+            $statsHtml .= $this->renderStatTile('', 'Stromversorgung', $d['wired'] ? 'Netzstrom' : 'Batterie');
+        }
+        $statsBlock = $statsHtml !== '' ? "<div class=\"current-grid\">{$statsHtml}</div>" : '';
+
+        $footerParts = [];
+        if ($d['lastTest'] !== null) {
+            $footerParts[] = 'Letzter Test: ' . htmlspecialchars(date('d.m.Y', $d['lastTest']), ENT_QUOTES);
+        }
+        if ($d['replaceBy'] !== null) {
+            $footerParts[] = 'Austausch: ' . htmlspecialchars(date('m/Y', $d['replaceBy']), ENT_QUOTES);
+        }
+        $footer = $footerParts !== [] ? '<div class="smoke-footer">' . implode(' &middot; ', $footerParts) . '</div>' : '';
+
+        return <<<NEST
+<div class="smoke-tile">
+  <div class="light-name">🚨 {$nameEsc}</div>
+  <div class="status-row">{$badges}</div>
+  {$statsBlock}
+  {$footer}
+</div>
+NEST;
     }
 
     private function renderSensorTile(array $sensor): string
@@ -1335,6 +1481,14 @@ SONOS;
             ? '<div class="pv-block"><div class="pv-title">📡 Sensoren</div><div class="current-grid">' . $sensorsHtml . '</div></div>'
             : '';
 
+        $smokeHtml = '';
+        foreach ($d['smokeDetectors'] as $detector) {
+            $smokeHtml .= $this->renderSmokeDetectorTile($detector);
+        }
+        $smokeBlock = $smokeHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">🚨 Rauchmelder</div><div class="tile-grid">' . $smokeHtml . '</div></div>'
+            : '';
+
         $roomNameEsc = htmlspecialchars($d['roomName'], ENT_QUOTES);
         $updatedEsc  = htmlspecialchars($d['updated'], ENT_QUOTES);
         $initJson    = json_encode($d);
@@ -1414,6 +1568,8 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .shutter-btns{display:flex;gap:6px}
 .shutter-btn{flex:1;background:#1a2535;border:1px solid #2a3a50;color:#d0e8ff;border-radius:6px;font-size:11px;padding:6px 4px;cursor:pointer}
 .shutter-btn-stop{flex:0 0 34px;color:#f08060}
+.smoke-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
+.smoke-footer{font-size:10px;color:#4a6a8a}
 </style>
 </head>
 <body>
@@ -1429,6 +1585,7 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 {$lightsBlock}
 {$shuttersBlock}
 {$sensorsBlock}
+{$smokeBlock}
 
 <script>
 (function() {

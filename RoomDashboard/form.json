@@ -130,6 +130,23 @@
     },
     {
       "type": "List",
+      "name": "smokeDetectors",
+      "caption": "Rauchmelder",
+      "rowCount": 3,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Gerät (Nest-Protect- oder Homematic-Rauchmelder-Instanz)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectObject", "validObjectTypes": [1, 2] } }
+      ],
+      "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Den Geräteknoten auswählen. Nest-Protect-Instanzen zeigen Rauch/CO/Hitze-Alarm, Batterie, Stromversorgung, Stummschaltung, letzten Selbsttest und Austauschdatum. Homematic-Rauchmelder zeigen nur den Alarmstatus (Rauch/CO/Batterie liefert dieser Melder-Typ nicht getrennt)."
+    },
+    {
+      "type": "List",
       "name": "sensors",
       "caption": "Sensoren & Kontakte",
       "rowCount": 6,
