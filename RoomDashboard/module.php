@@ -1119,12 +1119,18 @@ POSITION;
         return "<span class=\"badge {$cls}\">{$text}</span>";
     }
 
-    private function renderSmokeDetectorTile(array $d): string
+    /**
+     * With only one detector configured, the "🚨 Rauchmelder" section title
+     * already says what this is -- repeating the device's own name inside
+     * would just be a redundant nesting level, so it's only shown once
+     * there's more than one to tell apart.
+     */
+    private function renderSmokeDetectorTile(array $d, bool $showName): string
     {
-        $nameEsc = htmlspecialchars($d['name'], ENT_QUOTES);
+        $nameHtml = $showName ? '<div class="light-name">🚨 ' . htmlspecialchars($d['name'], ENT_QUOTES) . '</div>' : '';
 
         if ($d['kind'] !== 'nest') {
-            return "<div class=\"light-tile\"><span class=\"light-name\">🚨 {$nameEsc}</span>"
+            return "<div class=\"light-tile\">{$nameHtml}"
                 . $this->renderAlarmBadge('Alarm', $d['alarm']) . '</div>';
         }
 
@@ -1159,7 +1165,7 @@ POSITION;
 
         return <<<NEST
 <div class="smoke-tile">
-  <div class="light-name">🚨 {$nameEsc}</div>
+  {$nameHtml}
   <div class="status-row">{$badges}</div>
   {$statsBlock}
   {$footer}
@@ -1481,9 +1487,10 @@ SONOS;
             ? '<div class="pv-block"><div class="pv-title">📡 Sensoren</div><div class="current-grid">' . $sensorsHtml . '</div></div>'
             : '';
 
-        $smokeHtml = '';
+        $smokeHtml     = '';
+        $showSmokeName = count($d['smokeDetectors']) > 1;
         foreach ($d['smokeDetectors'] as $detector) {
-            $smokeHtml .= $this->renderSmokeDetectorTile($detector);
+            $smokeHtml .= $this->renderSmokeDetectorTile($detector, $showSmokeName);
         }
         $smokeBlock = $smokeHtml !== ''
             ? '<div class="pv-block"><div class="pv-title">🚨 Rauchmelder</div><div class="tile-grid">' . $smokeHtml . '</div></div>'
