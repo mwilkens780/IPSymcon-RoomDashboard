@@ -147,6 +147,23 @@
     },
     {
       "type": "List",
+      "name": "vacuums",
+      "caption": "Saugroboter",
+      "rowCount": 2,
+      "add": true,
+      "delete": true,
+      "columns": [
+        { "caption": "Name", "name": "name", "width": "200px", "add": "", "edit": { "type": "ValidationTextBox" } },
+        { "caption": "Gerät (Ecovacs-Saugroboter-Instanz)", "name": "variable", "width": "auto", "add": 0, "edit": { "type": "SelectObject", "validObjectTypes": [1] } }
+      ],
+      "values": []
+    },
+    {
+      "type": "Label",
+      "caption": "Den Geräteknoten einer Ecovacs-Saugroboter-Instanz auswählen -- Batterie, Status, Saugstufe, letzte Reinigung sowie Start/Pause/Stopp/Basis werden automatisch übernommen."
+    },
+    {
+      "type": "List",
       "name": "sensors",
       "caption": "Sensoren & Kontakte",
       "rowCount": 6,

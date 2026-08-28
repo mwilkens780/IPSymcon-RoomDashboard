@@ -28,6 +28,7 @@ class RoomDashboard extends IPSModule
         $this->RegisterPropertyString('thermostats', '[]');
         $this->RegisterPropertyString('automations', '[]');
         $this->RegisterPropertyString('smokeDetectors', '[]');
+        $this->RegisterPropertyString('vacuums', '[]');
 
         $this->RegisterTimer('UpdateTimer', 0, 'RMD_Refresh($_IPS[\'TARGET\']);');
 
@@ -50,13 +51,14 @@ class RoomDashboard extends IPSModule
         $thermostats = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
         $automations = json_decode($this->ReadPropertyString('automations'), true) ?: [];
         $smokeDetectors = json_decode($this->ReadPropertyString('smokeDetectors'), true) ?: [];
+        $vacuums = json_decode($this->ReadPropertyString('vacuums'), true) ?: [];
 
         $hasAnything = $this->ReadPropertyInteger('var_presence') > 0
             || $this->ReadPropertyInteger('sonos_instance') > 0
             || $this->ReadPropertyInteger('humidity_instance') > 0
             || count($lights) > 0 || count($shutters) > 0 || count($sensors) > 0
             || count($statusVars) > 0 || count($thermostats) > 0 || count($automations) > 0
-            || count($smokeDetectors) > 0;
+            || count($smokeDetectors) > 0 || count($vacuums) > 0;
 
         if (!$hasAnything) {
             $this->SetStatus(201);
@@ -150,6 +152,16 @@ class RoomDashboard extends IPSModule
 
             if (strpos($Ident, 'automation_') === 0) {
                 $this->forwardListAction('automations', (int) substr($Ident, strlen('automation_')), $Value, $Ident);
+                return;
+            }
+
+            if (strpos($Ident, 'vacuum_') === 0) {
+                // vacuum_{index}_{control}, e.g. "vacuum_0_clean", "vacuum_0_fanspeed"
+                $rest = substr($Ident, strlen('vacuum_'));
+                $sep  = strpos($rest, '_');
+                if ($sep !== false) {
+                    $this->forwardVacuumAction((int) substr($rest, 0, $sep), substr($rest, $sep + 1), $Value);
+                }
                 return;
             }
 
@@ -383,6 +395,41 @@ class RoomDashboard extends IPSModule
     }
 
     /**
+     * Saugroboter: forwards straight to the Ecovacs instance's own control
+     * functions (ECOV_*) rather than RequestAction() on a variable -- start/
+     * pause/stop/dock/fan speed aren't simple variable writes.
+     */
+    private function forwardVacuumAction(int $index, string $control, $value): void
+    {
+        $rows = json_decode($this->ReadPropertyString('vacuums'), true) ?: [];
+        if (!isset($rows[$index]['variable'])) {
+            return;
+        }
+        $nodeId = (int) $rows[$index]['variable'];
+        if ($nodeId <= 0 || !@IPS_InstanceExists($nodeId)) {
+            return;
+        }
+
+        switch ($control) {
+            case 'clean':
+                ECOV_Clean($nodeId);
+                break;
+            case 'pause':
+                ECOV_Pause($nodeId);
+                break;
+            case 'stop':
+                ECOV_Stop($nodeId);
+                break;
+            case 'dock':
+                ECOV_Dock($nodeId);
+                break;
+            case 'fanspeed':
+                ECOV_SetFanSpeed($nodeId, (int) $value);
+                break;
+        }
+    }
+
+    /**
      * TaHoma (Somfy) shutter idents: bidirectional covers expose a 0-100
      * position (core_TargetClosureState, or core_ClosureState as a
      * fallback for devices like Velux that don't report the target); RTS
@@ -558,6 +605,7 @@ class RoomDashboard extends IPSModule
         $humidity    = $this->collectHumidity();
         $automations = $this->collectAutomations();
         $smokeDetectors = $this->collectSmokeDetectors();
+        $vacuums = $this->collectVacuums();
 
         return [
             'roomName'       => $this->roomName(),
@@ -571,6 +619,7 @@ class RoomDashboard extends IPSModule
             'humidity'       => $humidity,
             'automations'    => $automations,
             'smokeDetectors' => $smokeDetectors,
+            'vacuums'        => $vacuums,
             'updated'        => date('d.m. H:i'),
         ];
     }
@@ -924,6 +973,45 @@ class RoomDashboard extends IPSModule
         return null;
     }
 
+    /** Saugroboter: an [[project_ecovacs]] "Ecovacs Saugroboter" instance -- Battery/Charging/State/FanSpeed/LastClean variables, read the same way as every other device-instance list here. */
+    private const ECOVACS_VACUUM_MODULE = '{EB763124-CE12-4CA8-943D-63BC93C61281}';
+
+    private function collectVacuums(): array
+    {
+        $out = [];
+        foreach (json_decode($this->ReadPropertyString('vacuums'), true) ?: [] as $i => $row) {
+            $nodeId = (int) ($row['variable'] ?? 0);
+            if ($nodeId <= 0 || !@IPS_InstanceExists($nodeId)) {
+                continue;
+            }
+            $moduleId = IPS_GetInstance($nodeId)['ModuleInfo']['ModuleID'] ?? '';
+            if ($moduleId !== self::ECOVACS_VACUUM_MODULE) {
+                continue;
+            }
+
+            $stateId = $this->varIdByIdent($nodeId, 'State');
+            if ($stateId <= 0) {
+                continue;
+            }
+            $batteryId  = $this->varIdByIdent($nodeId, 'Battery');
+            $chargingId = $this->varIdByIdent($nodeId, 'Charging');
+            $fanSpeedId = $this->varIdByIdent($nodeId, 'FanSpeed');
+            $lastCleanId = $this->varIdByIdent($nodeId, 'LastClean');
+
+            $nameOverride = ($row['name'] ?? '') !== '' ? $row['name'] : null;
+            $out[] = [
+                'ident'     => 'vacuum_' . $i,
+                'name'      => $nameOverride ?? $this->deviceName($nodeId),
+                'battery'   => $batteryId > 0 ? (int) $this->readVarById($batteryId) : 0,
+                'charging'  => $chargingId > 0 ? (bool) $this->readVarById($chargingId) : false,
+                'state'     => (string) $this->readVarById($stateId),
+                'fanSpeed'  => $fanSpeedId > 0 ? (int) $this->readVarById($fanSpeedId) : 0,
+                'lastClean' => $lastCleanId > 0 ? (string) $this->readVarById($lastCleanId) : '',
+            ];
+        }
+        return $out;
+    }
+
     private function collectThermostats(): array
     {
         $out = [];
@@ -1171,6 +1259,47 @@ POSITION;
   {$footer}
 </div>
 NEST;
+    }
+
+    private function renderVacuumTile(array $v): string
+    {
+        $ident   = $v['ident'];
+        $nameEsc = htmlspecialchars($v['name'], ENT_QUOTES);
+        $stateEsc = htmlspecialchars($v['state'], ENT_QUOTES);
+        $battery = $v['battery'];
+        $batteryColor = $battery <= 20 ? '#f08060' : ($battery <= 50 ? '#e0b356' : '#7ec8f0');
+        $chargeIcon = $v['charging'] ? ' ⚡' : '';
+
+        $speedLabels = [1000 => 'Leise', 0 => 'Normal', 1 => 'Stark', 2 => 'Max+'];
+        $speedButtons = '';
+        foreach ($speedLabels as $level => $label) {
+            $active = $v['fanSpeed'] === $level ? 'status-btn-active' : '';
+            $speedButtons .= "<button type=\"button\" class=\"status-btn {$active}\" onclick=\"requestAction('{$ident}_fanspeed', {$level})\">{$label}</button>";
+        }
+
+        $lastCleanHtml = $v['lastClean'] !== ''
+            ? '<div class="smoke-footer">' . htmlspecialchars($v['lastClean'], ENT_QUOTES) . '</div>'
+            : '';
+
+        return <<<HTML
+<div class="vacuum-tile">
+  <div class="vacuum-head">
+    <span class="light-name">🤖 {$nameEsc}</span>
+    <span class="badge badge-off">{$stateEsc}</span>
+  </div>
+  <div class="current-grid">
+    <div class='cur-tile'><span class='cur-label'>Batterie</span><span class='cur-value' style="color:{$batteryColor}">{$battery}%{$chargeIcon}</span></div>
+  </div>
+  <div class="shutter-btns">
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_clean', 1)" title="Start/Fortsetzen">▶️</button>
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_pause', 1)" title="Pause">⏸</button>
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_stop', 1)" title="Stopp">⏹</button>
+    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_dock', 1)" title="Zur Basis">🏠</button>
+  </div>
+  <div class="status-btn-group">{$speedButtons}</div>
+  {$lastCleanHtml}
+</div>
+HTML;
     }
 
     private function renderSensorTile(array $sensor): string
@@ -1496,6 +1625,14 @@ SONOS;
             ? '<div class="pv-block"><div class="pv-title">🚨 Rauchmelder</div><div class="tile-grid">' . $smokeHtml . '</div></div>'
             : '';
 
+        $vacuumsHtml = '';
+        foreach ($d['vacuums'] as $vacuum) {
+            $vacuumsHtml .= $this->renderVacuumTile($vacuum);
+        }
+        $vacuumsBlock = $vacuumsHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">🤖 Saugroboter</div><div class="tile-grid">' . $vacuumsHtml . '</div></div>'
+            : '';
+
         $roomNameEsc = htmlspecialchars($d['roomName'], ENT_QUOTES);
         $updatedEsc  = htmlspecialchars($d['updated'], ENT_QUOTES);
         $initJson    = json_encode($d);
@@ -1577,6 +1714,8 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .shutter-btn-stop{flex:0 0 34px;color:#f08060}
 .smoke-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
 .smoke-footer{font-size:10px;color:#4a6a8a}
+.vacuum-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
+.vacuum-head{display:flex;justify-content:space-between;align-items:center;gap:6px}
 </style>
 </head>
 <body>
@@ -1593,6 +1732,7 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 {$shuttersBlock}
 {$sensorsBlock}
 {$smokeBlock}
+{$vacuumsBlock}
 
 <script>
 (function() {
