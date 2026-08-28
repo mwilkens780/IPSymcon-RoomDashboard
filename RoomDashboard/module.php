@@ -1304,10 +1304,13 @@ SONOS;
         foreach ($d['lights'] as $light) {
             $lightsHtml .= $this->renderLightTile($light);
         }
-        $allLightsOn = count($d['lights']) > 0 && array_reduce($d['lights'], static function (bool $carry, array $l): bool {
+        // Reflects "at least one light is on" rather than "all are on" --
+        // otherwise the switch shows off as soon as a single light differs,
+        // forcing an on-then-off round trip just to turn everything off.
+        $allLightsOn = array_reduce($d['lights'], static function (bool $carry, array $l): bool {
             $isOn = $l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) ($l['on'] ?? false);
-            return $carry && $isOn;
-        }, true);
+            return $carry || $isOn;
+        }, false);
         $allLightsToggle = count($d['lights']) > 1
             ? '<label class="toggle"><input id="lights_all_input" type="checkbox"' . ($allLightsOn ? ' checked' : '')
                 . ' onchange="requestAction(\'lights_all\', this.checked)"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>'
@@ -1638,11 +1641,11 @@ window.handleMessage = function(raw) {
     });
 
     var allLightsInput = document.getElementById('lights_all_input');
-    if (allLightsInput && val.lights && val.lights.length > 0) {
-      var allOn = val.lights.every(function(l) {
+    if (allLightsInput && val.lights) {
+      var anyOn = val.lights.some(function(l) {
         return l.kind === 'dimmer' ? (l.brightness > 0) : !!l.on;
       });
-      allLightsInput.checked = allOn;
+      allLightsInput.checked = anyOn;
     }
 
     (val.shutters || []).forEach(function(shutter) {
