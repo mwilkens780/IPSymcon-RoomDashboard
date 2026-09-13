@@ -369,22 +369,28 @@ class RoomDashboard extends IPSModule
     }
 
     /**
-     * HomeMatic climate control is sometimes split across two sibling
-     * channels of the same physical setup instead of one: a wall thermostat/
-     * remote (SET_TEMPERATURE/ACTUAL_TEMPERATURE, e.g.
-     * "Badezimmer_Termostat:2") and the separate radiator valve actuator
-     * that actually drives CONTROL_MODE (e.g. "Badezimmer_Heizung:4"). Both
-     * channels can carry a same-named CONTROL_MODE datapoint (the wall unit
-     * just mirrors the mode for display), but only the valve's copy has an
-     * action registered -- picking the configured node's own copy blindly
-     * sends RequestAction() at a read-only mirror, which throws "No valid
-     * action available" (verified live: exactly the error reported for the
-     * Badezimmer Auto/Manuell switch, 13.09.2026). Prefers an actionable
-     * match across the node and its category siblings; falls back to
-     * whatever ident exists at all so display-only reads keep working even
-     * when nothing is writable.
+     * Verified live against the Badezimmer thermostat (13.09.-14.09.2026):
+     * CONTROL_MODE has NO IP-Symcon action registered at all on this
+     * HomeMatic setup -- neither on the configured wall thermostat channel
+     * ("Badezimmer_Termostat:2") nor on its sibling radiator valve actuator
+     * ("Badezimmer_Heizung:4"); "Edit Object" shows "(None)" for both. The
+     * global RequestAction() therefore always throws "No valid action
+     * available" for this datapoint regardless of which copy is picked --
+     * picking a different sibling (the first, disproven fix) changes
+     * nothing. HomeMatic devices routinely leave CONTROL_MODE non-actionable
+     * like this; the standard way to still write it is the native
+     * HM_WriteValueInteger()/-Boolean()/-Float()/-String() functions, which
+     * write the raw CCU datapoint directly on the owning channel instance,
+     * bypassing IP-Symcon's action system entirely (confirmed present on
+     * this installation via the DataServer's "Override of native function
+     * HM_WriteValueInteger" warning for an unrelated module).
+     *
+     * Returns the instance/ident/variable to use, preferring an ident that
+     * IS actionable (so RequestAction still gets used where it works) but
+     * falling back to the first match found -- across the node and its
+     * category siblings -- for the HM_WriteValue* fallback otherwise.
      */
-    private function actionableVarIdAcrossSiblings(int $nodeId, array $idents): int
+    private function resolveModeTarget(int $nodeId, array $idents): array
     {
         $candidateNodes = [$nodeId];
         $parentId       = @IPS_GetParent($nodeId);
@@ -396,20 +402,41 @@ class RoomDashboard extends IPSModule
             }
         }
 
-        $firstFound = 0;
+        $first = null;
         foreach ($candidateNodes as $candidateNode) {
-            $id = $this->firstVarIdByIdent($candidateNode, $idents);
-            if ($id <= 0) {
-                continue;
-            }
-            if ($firstFound === 0) {
-                $firstFound = $id;
-            }
-            if ($this->isActionable($id)) {
-                return $id;
+            foreach ($idents as $ident) {
+                $varId = $this->varIdByIdent($candidateNode, $ident);
+                if ($varId <= 0) {
+                    continue;
+                }
+                $found = ['instanceId' => $candidateNode, 'ident' => $ident, 'varId' => $varId];
+                if ($first === null) {
+                    $first = $found;
+                }
+                if ($this->isActionable($varId)) {
+                    return $found;
+                }
             }
         }
-        return $firstFound;
+        return $first ?? ['instanceId' => 0, 'ident' => '', 'varId' => 0];
+    }
+
+    /** Writes a HomeMatic datapoint directly via the native HM_WriteValue* functions, for variables IP-Symcon never registered an action for. */
+    private function writeHomeMaticValue(int $instanceId, string $ident, $castValue): bool
+    {
+        if (is_bool($castValue) && function_exists('HM_WriteValueBoolean')) {
+            return (bool) @HM_WriteValueBoolean($instanceId, $ident, $castValue);
+        }
+        if (is_int($castValue) && function_exists('HM_WriteValueInteger')) {
+            return (bool) @HM_WriteValueInteger($instanceId, $ident, $castValue);
+        }
+        if (is_float($castValue) && function_exists('HM_WriteValueFloat')) {
+            return (bool) @HM_WriteValueFloat($instanceId, $ident, $castValue);
+        }
+        if (is_string($castValue) && function_exists('HM_WriteValueString')) {
+            return (bool) @HM_WriteValueString($instanceId, $ident, $castValue);
+        }
+        return false;
     }
 
     private function forwardThermostatAction(int $index, string $control, $value, string $pushIdent): void
@@ -423,18 +450,27 @@ class RoomDashboard extends IPSModule
             return;
         }
 
-        $targetId = 0;
-        if (@IPS_InstanceExists($nodeId)) {
-            $identsByControl = [
-                'soll' => self::THERMOSTAT_SET_IDENTS,
-                'mode' => self::THERMOSTAT_MODE_IDENTS,
-            ];
-            if (!isset($identsByControl[$control])) {
+        if ($control === 'mode') {
+            if (!@IPS_InstanceExists($nodeId)) {
                 return;
             }
-            $targetId = $control === 'mode'
-                ? $this->actionableVarIdAcrossSiblings($nodeId, $identsByControl[$control])
-                : $this->firstVarIdByIdent($nodeId, $identsByControl[$control]);
+            $target = $this->resolveModeTarget($nodeId, self::THERMOSTAT_MODE_IDENTS);
+            if ($target['varId'] <= 0) {
+                return;
+            }
+            $cast = $this->castToVarType($target['varId'], $value);
+            if ($this->isActionable($target['varId'])) {
+                RequestAction($target['varId'], $cast);
+            } else {
+                $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
+            }
+            $this->pushValue($pushIdent, $cast);
+            return;
+        }
+
+        $targetId = 0;
+        if (@IPS_InstanceExists($nodeId) && $control === 'soll') {
+            $targetId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
         } elseif (@IPS_VariableExists($nodeId) && $control === 'soll') {
             $targetId = $nodeId;
         }
@@ -1078,7 +1114,7 @@ class RoomDashboard extends IPSModule
             if (@IPS_InstanceExists($nodeId)) {
                 $sollId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
                 $istId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_ACTUAL_IDENTS);
-                $modeId = $this->actionableVarIdAcrossSiblings($nodeId, self::THERMOSTAT_MODE_IDENTS);
+                $modeId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_MODE_IDENTS);
             } elseif (@IPS_VariableExists($nodeId)) {
                 $sollId = $nodeId;
             }
