@@ -361,6 +361,57 @@ class RoomDashboard extends IPSModule
         return 0;
     }
 
+    /** Whether IP-Symcon has an action handler registered for this variable -- if not, the global RequestAction() throws "No valid action available" rather than writing anything. */
+    private function isActionable(int $varId): bool
+    {
+        $var = @IPS_GetVariable($varId);
+        return $var !== false && (int) ($var['VariableAction'] ?? 0) > 0;
+    }
+
+    /**
+     * HomeMatic climate control is sometimes split across two sibling
+     * channels of the same physical setup instead of one: a wall thermostat/
+     * remote (SET_TEMPERATURE/ACTUAL_TEMPERATURE, e.g.
+     * "Badezimmer_Termostat:2") and the separate radiator valve actuator
+     * that actually drives CONTROL_MODE (e.g. "Badezimmer_Heizung:4"). Both
+     * channels can carry a same-named CONTROL_MODE datapoint (the wall unit
+     * just mirrors the mode for display), but only the valve's copy has an
+     * action registered -- picking the configured node's own copy blindly
+     * sends RequestAction() at a read-only mirror, which throws "No valid
+     * action available" (verified live: exactly the error reported for the
+     * Badezimmer Auto/Manuell switch, 13.09.2026). Prefers an actionable
+     * match across the node and its category siblings; falls back to
+     * whatever ident exists at all so display-only reads keep working even
+     * when nothing is writable.
+     */
+    private function actionableVarIdAcrossSiblings(int $nodeId, array $idents): int
+    {
+        $candidateNodes = [$nodeId];
+        $parentId       = @IPS_GetParent($nodeId);
+        if ($parentId > 0) {
+            foreach (@IPS_GetChildrenIDs($parentId) ?: [] as $siblingId) {
+                if ($siblingId !== $nodeId && @IPS_InstanceExists($siblingId)) {
+                    $candidateNodes[] = $siblingId;
+                }
+            }
+        }
+
+        $firstFound = 0;
+        foreach ($candidateNodes as $candidateNode) {
+            $id = $this->firstVarIdByIdent($candidateNode, $idents);
+            if ($id <= 0) {
+                continue;
+            }
+            if ($firstFound === 0) {
+                $firstFound = $id;
+            }
+            if ($this->isActionable($id)) {
+                return $id;
+            }
+        }
+        return $firstFound;
+    }
+
     private function forwardThermostatAction(int $index, string $control, $value, string $pushIdent): void
     {
         $rows = json_decode($this->ReadPropertyString('thermostats'), true) ?: [];
@@ -381,7 +432,9 @@ class RoomDashboard extends IPSModule
             if (!isset($identsByControl[$control])) {
                 return;
             }
-            $targetId = $this->firstVarIdByIdent($nodeId, $identsByControl[$control]);
+            $targetId = $control === 'mode'
+                ? $this->actionableVarIdAcrossSiblings($nodeId, $identsByControl[$control])
+                : $this->firstVarIdByIdent($nodeId, $identsByControl[$control]);
         } elseif (@IPS_VariableExists($nodeId) && $control === 'soll') {
             $targetId = $nodeId;
         }
@@ -1025,7 +1078,7 @@ class RoomDashboard extends IPSModule
             if (@IPS_InstanceExists($nodeId)) {
                 $sollId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
                 $istId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_ACTUAL_IDENTS);
-                $modeId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_MODE_IDENTS);
+                $modeId = $this->actionableVarIdAcrossSiblings($nodeId, self::THERMOSTAT_MODE_IDENTS);
             } elseif (@IPS_VariableExists($nodeId)) {
                 $sollId = $nodeId;
             }
