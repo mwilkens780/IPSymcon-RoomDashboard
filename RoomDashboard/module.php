@@ -450,9 +450,12 @@ class RoomDashboard extends IPSModule
         return 0;
     }
 
-    /** Writes a HomeMatic datapoint directly via the native HM_WriteValue* functions, for variables IP-Symcon never registered an action for. */
+    /** Writes a HomeMatic datapoint directly for variables IP-Symcon never registered an action for. Prefers HM_WritePara (real CCU/RPC write) over the legacy HM_WriteValue* compatibility shims, which only update the local cached value without reaching the device. */
     private function writeHomeMaticValue(int $instanceId, string $ident, $castValue): bool
     {
+        if (function_exists('HM_WritePara')) {
+            return (bool) @HM_WritePara($instanceId, $ident, $castValue);
+        }
         if (is_bool($castValue) && function_exists('HM_WriteValueBoolean')) {
             return (bool) @HM_WriteValueBoolean($instanceId, $ident, $castValue);
         }
@@ -499,21 +502,31 @@ class RoomDashboard extends IPSModule
                 // every module reload, which suggests these legacy functions don't actually route
                 // into the official "HomeMatic CCU Device" module at all. Dump every registered
                 // function that could plausibly be the real write path so we stop guessing names.
-                $candidates = array_filter(
-                    get_defined_functions()['user'] ?? [],
+                $allFunctions = get_defined_functions();
+                $candidates   = array_filter(
+                    array_merge($allFunctions['internal'] ?? [], $allFunctions['user'] ?? []),
                     fn ($f) => preg_match('/^hm|ccu/i', $f)
                 );
                 $this->LogMessage(
-                    'RoomDashboard verfügbare HM/CCU-Funktionen: ' . implode(', ', $candidates),
+                    'RoomDashboard verfügbare HM/CCU-Funktionen (internal+user): ' . implode(', ', $candidates),
+                    KL_MESSAGE
+                );
+                $this->LogMessage(
+                    'RoomDashboard Existenzcheck: HM_WriteValueInteger=' . (function_exists('HM_WriteValueInteger') ? 'ja' : 'nein')
+                    . ', HM_WriteValueInteger2=' . (function_exists('HM_WriteValueInteger2') ? 'ja' : 'nein')
+                    . ', HM_WritePara=' . (function_exists('HM_WritePara') ? 'ja' : 'nein')
+                    . ', HM_ReadPara=' . (function_exists('HM_ReadPara') ? 'ja' : 'nein'),
                     KL_MESSAGE
                 );
 
                 $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
                 $readback = @GetValue($target['varId']);
+                $ccuReadback = function_exists('HM_ReadPara') ? @HM_ReadPara($target['instanceId'], $target['ident']) : 'HM_ReadPara fehlt';
                 $this->LogMessage(
                     "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
-                    . 'gesendet ' . var_export($cast, true) . ', HM_WriteValue* meldet ' . ($ok ? 'true' : 'false')
-                    . ', Wert danach ' . var_export($readback, true),
+                    . 'gesendet ' . var_export($cast, true) . ', Schreibfunktion meldet ' . ($ok ? 'true' : 'false')
+                    . ', IPS-Wert danach ' . var_export($readback, true)
+                    . ', CCU-Wert direkt (HM_ReadPara) ' . var_export($ccuReadback, true),
                     KL_MESSAGE
                 );
                 if (!$ok) {
