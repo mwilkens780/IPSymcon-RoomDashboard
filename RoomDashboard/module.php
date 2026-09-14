@@ -500,40 +500,50 @@ class RoomDashboard extends IPSModule
                 RequestAction($target['varId'], $cast);
             } else {
                 // Temporary diagnostic (remove once the real CCU write path is confirmed, 14.09.2026):
-                // the user confirmed the CCU3's own WebUI can switch this device's mode, so this is
-                // a software/API problem, not a hardware limitation -- HM_WritePara/HM_ReadPara throw
-                // "Instance does not implement this function" on the device-CHANNEL instance, which
-                // suggests they belong to the parent Splitter/IO instance instead (using the device's
-                // address string, not an IPS instance ID). Use reflection to get their real
-                // signatures instead of guessing more argument combinations, and walk the instance's
-                // ConnectionID chain to find the actual Splitter instance to try them on.
-                try {
-                    foreach (['HM_WritePara', 'HM_ReadPara', 'HM_GetParamsetDescription', 'HM_WriteValueInteger'] as $fn) {
-                        if (!function_exists($fn)) {
-                            continue;
-                        }
-                        $ref = new \ReflectionFunction($fn);
-                        $params = array_map(fn ($p) => $p->getName() . ($p->hasType() ? ':' . $p->getType() : ''), $ref->getParameters());
-                        $this->LogMessage("RoomDashboard Signatur {$fn}(" . implode(', ', $params) . ')', KL_MESSAGE);
-                    }
-                } catch (\Throwable $e) {
-                    $this->LogMessage('RoomDashboard Reflection fehlgeschlagen: ' . $e->getMessage(), KL_ERROR);
-                }
-
-                $chain = [];
+                // the instance chain shows 38092's ConnectionID is 57486 ("HomeMatic CCU Socket" --
+                // the actual splitter), with Address 'MEQ0047915:2' on the channel instance itself.
+                // HM_WritePara threw "Instance does not implement this function" on 38092 because it
+                // belongs to the Socket module, not the CCU Device module -- try it on the splitter
+                // instead, with a few plausible argument shapes since reflection on these
+                // dynamically-registered functions doesn't reliably reveal the true signature.
+                $address = (string) (@IPS_GetProperty($target['instanceId'], 'Address') ?: '');
+                $splitterId = 0;
                 $walkId = $target['instanceId'];
                 for ($i = 0; $i < 5 && $walkId > 0; $i++) {
                     $inst = @IPS_GetInstance($walkId);
                     if ($inst === false) {
                         break;
                     }
-                    $address = @IPS_GetProperty($walkId, 'Address');
-                    $chain[] = "{$walkId} (Modul {$inst['ModuleInfo']['ModuleName']}, Address=" . var_export($address, true) . ')';
+                    if (stripos($inst['ModuleInfo']['ModuleName'], 'Socket') !== false || stripos($inst['ModuleInfo']['ModuleName'], 'Splitter') !== false) {
+                        $splitterId = $walkId;
+                        break;
+                    }
                     $walkId = (int) $inst['ConnectionID'];
                 }
-                $this->LogMessage('RoomDashboard Instanzkette (Kind zu Wurzel): ' . implode(' -> ', $chain), KL_MESSAGE);
+                $this->LogMessage("RoomDashboard Splitter gefunden: {$splitterId}, Address der Kanal-Instanz: '{$address}'", KL_MESSAGE);
 
-                $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
+                $ok = false;
+                if ($splitterId > 0 && $address !== '' && function_exists('HM_WritePara')) {
+                    $attempts = [
+                        'splitter+dotted-address' => fn () => HM_WritePara($splitterId, $address . '.' . $target['ident'], $cast),
+                        'splitter+address+ident'  => fn () => HM_WritePara($splitterId, $address, $target['ident'], $cast),
+                        'channel+ident'           => fn () => HM_WritePara($target['instanceId'], $target['ident'], $cast),
+                    ];
+                    foreach ($attempts as $label => $attempt) {
+                        try {
+                            $result = $attempt();
+                            $this->LogMessage("RoomDashboard HM_WritePara Versuch '{$label}' erfolgreich, Rückgabe: " . var_export($result, true), KL_MESSAGE);
+                            $ok = true;
+                            break;
+                        } catch (\Throwable $e) {
+                            $this->LogMessage("RoomDashboard HM_WritePara Versuch '{$label}' fehlgeschlagen: " . $e->getMessage(), KL_ERROR);
+                        }
+                    }
+                }
+
+                if (!$ok) {
+                    $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
+                }
                 $readback = @GetValue($target['varId']);
                 $this->LogMessage(
                     "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
