@@ -450,11 +450,15 @@ class RoomDashboard extends IPSModule
         return 0;
     }
 
-    /** Writes a HomeMatic datapoint directly for variables IP-Symcon never registered an action for. Prefers HM_WritePara (real CCU/RPC write) over the legacy HM_WriteValue* compatibility shims, which only update the local cached value without reaching the device. */
+    /** Writes a HomeMatic datapoint directly for variables IP-Symcon never registered an action for. Tries HM_WritePara first (real CCU/RPC write), but that function throws "Instance does not implement this function" on a device-channel instance (it apparently belongs to a different instance type), so it must be wrapped -- an uncaught exception here would abort the whole RequestAction() call and make the WebFront button appear stuck. Falls back to the legacy HM_WriteValue* compatibility shims, which only update the local cached value without reaching the device. */
     private function writeHomeMaticValue(int $instanceId, string $ident, $castValue): bool
     {
         if (function_exists('HM_WritePara')) {
-            return (bool) @HM_WritePara($instanceId, $ident, $castValue);
+            try {
+                return (bool) @HM_WritePara($instanceId, $ident, $castValue);
+            } catch (\Throwable $e) {
+                $this->LogMessage('RoomDashboard HM_WritePara fehlgeschlagen: ' . $e->getMessage(), KL_ERROR);
+            }
         }
         if (is_bool($castValue) && function_exists('HM_WriteValueBoolean')) {
             return (bool) @HM_WriteValueBoolean($instanceId, $ident, $castValue);
@@ -496,32 +500,37 @@ class RoomDashboard extends IPSModule
                 RequestAction($target['varId'], $cast);
             } else {
                 // Temporary diagnostic (remove once the real CCU write path is confirmed, 14.09.2026):
-                // HM_WriteValue* reports success and updates the local value, but the CCU never
-                // receives the change -- IPS logs a systemic "Override of native function
-                // HM_WriteValue* is not implemented. Module: HomeMatic Systemvariablen" warning on
-                // every module reload, which suggests these legacy functions don't actually route
-                // into the official "HomeMatic CCU Device" module at all. Dump every registered
-                // function that could plausibly be the real write path so we stop guessing names.
-                $allFunctions = get_defined_functions();
-                $candidates   = array_filter(
-                    array_merge($allFunctions['internal'] ?? [], $allFunctions['user'] ?? []),
-                    fn ($f) => preg_match('/^hm|ccu/i', $f)
-                );
-                $this->LogMessage(
-                    'RoomDashboard verfügbare HM/CCU-Funktionen (internal+user): ' . implode(', ', $candidates),
-                    KL_MESSAGE
-                );
-                $this->LogMessage(
-                    'RoomDashboard Existenzcheck: HM_WriteValueInteger=' . (function_exists('HM_WriteValueInteger') ? 'ja' : 'nein')
-                    . ', HM_WriteValueInteger2=' . (function_exists('HM_WriteValueInteger2') ? 'ja' : 'nein')
-                    . ', HM_WritePara=' . (function_exists('HM_WritePara') ? 'ja' : 'nein')
-                    . ', HM_ReadPara=' . (function_exists('HM_ReadPara') ? 'ja' : 'nein'),
-                    KL_MESSAGE
-                );
+                // find out whether CONTROL_MODE is genuinely writable at the HomeMatic protocol
+                // level at all (ISWRITEABLE flag in its paramset description) before trying any
+                // more write functions blindly. Every call here is wrapped -- an uncaught
+                // \Throwable from a diagnostic call must never abort the real write attempt below,
+                // let alone the whole RequestAction(), which would leave the WebFront button stuck.
+                foreach (['VALUES', 'MASTER'] as $paramset) {
+                    try {
+                        $desc = function_exists('HM_GetParamsetDescription')
+                            ? @HM_GetParamsetDescription($target['instanceId'], $paramset)
+                            : null;
+                        $entry = is_array($desc) ? ($desc[$target['ident']] ?? null) : null;
+                        $this->LogMessage(
+                            "RoomDashboard Paramset {$paramset} für {$target['ident']} an Instanz {$target['instanceId']}: "
+                            . ($entry !== null ? var_export($entry, true) : 'nicht gefunden/Funktion fehlt'),
+                            KL_MESSAGE
+                        );
+                    } catch (\Throwable $e) {
+                        $this->LogMessage("RoomDashboard Paramset {$paramset} Abfrage fehlgeschlagen: " . $e->getMessage(), KL_ERROR);
+                    }
+                }
 
                 $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
                 $readback = @GetValue($target['varId']);
-                $ccuReadback = function_exists('HM_ReadPara') ? @HM_ReadPara($target['instanceId'], $target['ident']) : 'HM_ReadPara fehlt';
+                $ccuReadback = 'übersprungen';
+                if (function_exists('HM_ReadPara')) {
+                    try {
+                        $ccuReadback = @HM_ReadPara($target['instanceId'], $target['ident']);
+                    } catch (\Throwable $e) {
+                        $ccuReadback = 'Fehler: ' . $e->getMessage();
+                    }
+                }
                 $this->LogMessage(
                     "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
                     . 'gesendet ' . var_export($cast, true) . ', Schreibfunktion meldet ' . ($ok ? 'true' : 'false')
