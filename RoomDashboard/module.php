@@ -500,42 +500,45 @@ class RoomDashboard extends IPSModule
                 RequestAction($target['varId'], $cast);
             } else {
                 // Temporary diagnostic (remove once the real CCU write path is confirmed, 14.09.2026):
-                // find out whether CONTROL_MODE is genuinely writable at the HomeMatic protocol
-                // level at all (ISWRITEABLE flag in its paramset description) before trying any
-                // more write functions blindly. Every call here is wrapped -- an uncaught
-                // \Throwable from a diagnostic call must never abort the real write attempt below,
-                // let alone the whole RequestAction(), which would leave the WebFront button stuck.
-                foreach (['VALUES', 'MASTER'] as $paramset) {
-                    try {
-                        $desc = function_exists('HM_GetParamsetDescription')
-                            ? @HM_GetParamsetDescription($target['instanceId'], $paramset)
-                            : null;
-                        $entry = is_array($desc) ? ($desc[$target['ident']] ?? null) : null;
-                        $this->LogMessage(
-                            "RoomDashboard Paramset {$paramset} für {$target['ident']} an Instanz {$target['instanceId']}: "
-                            . ($entry !== null ? var_export($entry, true) : 'nicht gefunden/Funktion fehlt'),
-                            KL_MESSAGE
-                        );
-                    } catch (\Throwable $e) {
-                        $this->LogMessage("RoomDashboard Paramset {$paramset} Abfrage fehlgeschlagen: " . $e->getMessage(), KL_ERROR);
+                // the user confirmed the CCU3's own WebUI can switch this device's mode, so this is
+                // a software/API problem, not a hardware limitation -- HM_WritePara/HM_ReadPara throw
+                // "Instance does not implement this function" on the device-CHANNEL instance, which
+                // suggests they belong to the parent Splitter/IO instance instead (using the device's
+                // address string, not an IPS instance ID). Use reflection to get their real
+                // signatures instead of guessing more argument combinations, and walk the instance's
+                // ConnectionID chain to find the actual Splitter instance to try them on.
+                try {
+                    foreach (['HM_WritePara', 'HM_ReadPara', 'HM_GetParamsetDescription', 'HM_WriteValueInteger'] as $fn) {
+                        if (!function_exists($fn)) {
+                            continue;
+                        }
+                        $ref = new \ReflectionFunction($fn);
+                        $params = array_map(fn ($p) => $p->getName() . ($p->hasType() ? ':' . $p->getType() : ''), $ref->getParameters());
+                        $this->LogMessage("RoomDashboard Signatur {$fn}(" . implode(', ', $params) . ')', KL_MESSAGE);
                     }
+                } catch (\Throwable $e) {
+                    $this->LogMessage('RoomDashboard Reflection fehlgeschlagen: ' . $e->getMessage(), KL_ERROR);
                 }
+
+                $chain = [];
+                $walkId = $target['instanceId'];
+                for ($i = 0; $i < 5 && $walkId > 0; $i++) {
+                    $inst = @IPS_GetInstance($walkId);
+                    if ($inst === false) {
+                        break;
+                    }
+                    $address = @IPS_GetProperty($walkId, 'Address');
+                    $chain[] = "{$walkId} (Modul {$inst['ModuleInfo']['ModuleName']}, Address=" . var_export($address, true) . ')';
+                    $walkId = (int) $inst['ConnectionID'];
+                }
+                $this->LogMessage('RoomDashboard Instanzkette (Kind zu Wurzel): ' . implode(' -> ', $chain), KL_MESSAGE);
 
                 $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
                 $readback = @GetValue($target['varId']);
-                $ccuReadback = 'übersprungen';
-                if (function_exists('HM_ReadPara')) {
-                    try {
-                        $ccuReadback = @HM_ReadPara($target['instanceId'], $target['ident']);
-                    } catch (\Throwable $e) {
-                        $ccuReadback = 'Fehler: ' . $e->getMessage();
-                    }
-                }
                 $this->LogMessage(
                     "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
                     . 'gesendet ' . var_export($cast, true) . ', Schreibfunktion meldet ' . ($ok ? 'true' : 'false')
-                    . ', IPS-Wert danach ' . var_export($readback, true)
-                    . ', CCU-Wert direkt (HM_ReadPara) ' . var_export($ccuReadback, true),
+                    . ', IPS-Wert danach ' . var_export($readback, true),
                     KL_MESSAGE
                 );
                 if (!$ok) {
