@@ -348,6 +348,7 @@ class RoomDashboard extends IPSModule
     private const THERMOSTAT_SET_IDENTS    = ['SET_TEMPERATURE', 'SET_POINT_TEMPERATURE', 'SETPOINT'];
     private const THERMOSTAT_ACTUAL_IDENTS = ['ACTUAL_TEMPERATURE', 'TEMPERATURE'];
     private const THERMOSTAT_MODE_IDENTS   = ['CONTROL_MODE', 'SET_POINT_MODE'];
+    private const THERMOSTAT_VALVE_IDENTS  = ['VALVE_STATE', 'LEVEL'];
     private const THERMOSTAT_RANGE         = [5.0, 30.0, 0.5];
 
     private function firstVarIdByIdent(int $instanceId, array $idents): int
@@ -369,56 +370,66 @@ class RoomDashboard extends IPSModule
     }
 
     /**
-     * Verified live against the Badezimmer thermostat (13.09.-14.09.2026):
-     * CONTROL_MODE has NO IP-Symcon action registered at all on this
-     * HomeMatic setup -- neither on the configured wall thermostat channel
-     * ("Badezimmer_Termostat:2") nor on its sibling radiator valve actuator
-     * ("Badezimmer_Heizung:4"); "Edit Object" shows "(None)" for both. The
-     * global RequestAction() therefore always throws "No valid action
-     * available" for this datapoint regardless of which copy is picked --
-     * picking a different sibling (the first, disproven fix) changes
-     * nothing. HomeMatic devices routinely leave CONTROL_MODE non-actionable
-     * like this; the standard way to still write it is the native
-     * HM_WriteValueInteger()/-Boolean()/-Float()/-String() functions, which
-     * write the raw CCU datapoint directly on the owning channel instance,
-     * bypassing IP-Symcon's action system entirely (confirmed present on
-     * this installation via the DataServer's "Override of native function
-     * HM_WriteValueInteger" warning for an unrelated module).
+     * Verified live against the Badezimmer thermostat (13.-14.09.2026): on
+     * the CONFIGURED node itself, SET_TEMPERATURE has a working Default
+     * Action ("Edit Object" shows it pointing back at the instance) but
+     * CONTROL_MODE has none at all ("(None)"/"(None)") -- confirmed on the
+     * wall thermostat "Badezimmer_Termostat:2" specifically, the actual
+     * node this dashboard controls. An earlier attempt routed the mode
+     * write to a sibling device instead (the separate radiator valve
+     * "Badezimmer_Heizung:4") on the mistaken assumption that only the
+     * valve could execute mode changes -- wrong: the thermostat is the
+     * correct, sole place to both read and write climate control, and
+     * switching devices produced a value mismatch (the valve isn't
+     * necessarily in sync). Always resolves on the node itself now.
      *
-     * Returns the instance/ident/variable to use, preferring an ident that
-     * IS actionable (so RequestAction still gets used where it works) but
-     * falling back to the first match found -- across the node and its
-     * category siblings -- for the HM_WriteValue* fallback otherwise.
+     * HomeMatic leaving CONTROL_MODE non-actionable like this is normal;
+     * the datapoint is still writable directly via the native
+     * HM_WriteValueInteger()/-Boolean()/-Float()/-String() functions, which
+     * write the raw CCU datapoint on the instance, bypassing IP-Symcon's
+     * action system entirely (confirmed present on this installation via
+     * the DataServer's "Override of native function HM_WriteValueInteger"
+     * warning logged for an unrelated module).
      */
     private function resolveModeTarget(int $nodeId, array $idents): array
     {
-        $candidateNodes = [$nodeId];
-        $parentId       = @IPS_GetParent($nodeId);
-        if ($parentId > 0) {
-            foreach (@IPS_GetChildrenIDs($parentId) ?: [] as $siblingId) {
-                if ($siblingId !== $nodeId && @IPS_InstanceExists($siblingId)) {
-                    $candidateNodes[] = $siblingId;
-                }
+        foreach ($idents as $ident) {
+            $varId = $this->varIdByIdent($nodeId, $ident);
+            if ($varId > 0) {
+                return ['instanceId' => $nodeId, 'ident' => $ident, 'varId' => $varId];
             }
         }
+        return ['instanceId' => 0, 'ident' => '', 'varId' => 0];
+    }
 
-        $first = null;
-        foreach ($candidateNodes as $candidateNode) {
-            foreach ($idents as $ident) {
-                $varId = $this->varIdByIdent($candidateNode, $ident);
-                if ($varId <= 0) {
-                    continue;
-                }
-                $found = ['instanceId' => $candidateNode, 'ident' => $ident, 'varId' => $varId];
-                if ($first === null) {
-                    $first = $found;
-                }
-                if ($this->isActionable($varId)) {
-                    return $found;
-                }
+    /**
+     * Radiator valve open-percentage (VALVE_STATE) lives only on the
+     * separate valve actuator device, not on the wall thermostat that this
+     * dashboard otherwise reads/controls (e.g. "Badezimmer_Heizung:4" next
+     * to the configured "Badezimmer_Termostat:2") -- read-only display
+     * value, so unlike mode/soll it's fine to look across category
+     * siblings for it instead of forcing a separate config field per room.
+     */
+    private function firstVarIdByIdentAcrossSiblings(int $nodeId, array $idents): int
+    {
+        $direct = $this->firstVarIdByIdent($nodeId, $idents);
+        if ($direct > 0) {
+            return $direct;
+        }
+        $parentId = @IPS_GetParent($nodeId);
+        if ($parentId <= 0) {
+            return 0;
+        }
+        foreach (@IPS_GetChildrenIDs($parentId) ?: [] as $siblingId) {
+            if ($siblingId === $nodeId || !@IPS_InstanceExists($siblingId)) {
+                continue;
+            }
+            $id = $this->firstVarIdByIdent($siblingId, $idents);
+            if ($id > 0) {
+                return $id;
             }
         }
-        return $first ?? ['instanceId' => 0, 'ident' => '', 'varId' => 0];
+        return 0;
     }
 
     /** Writes a HomeMatic datapoint directly via the native HM_WriteValue* functions, for variables IP-Symcon never registered an action for. */
@@ -461,8 +472,9 @@ class RoomDashboard extends IPSModule
             $cast = $this->castToVarType($target['varId'], $value);
             if ($this->isActionable($target['varId'])) {
                 RequestAction($target['varId'], $cast);
-            } else {
-                $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
+            } elseif (!$this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast)) {
+                $this->LogMessage("RoomDashboard forwardThermostatAction: HM_WriteValue* failed for instance {$target['instanceId']} ident {$target['ident']}", KL_ERROR);
+                return;
             }
             $this->pushValue($pushIdent, $cast);
             return;
@@ -1110,11 +1122,15 @@ class RoomDashboard extends IPSModule
                 continue;
             }
 
-            $sollId = $istId = $modeId = 0;
+            $sollId = $istId = $modeId = $valveId = 0;
             if (@IPS_InstanceExists($nodeId)) {
-                $sollId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
-                $istId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_ACTUAL_IDENTS);
-                $modeId = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_MODE_IDENTS);
+                $sollId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_SET_IDENTS);
+                $istId   = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_ACTUAL_IDENTS);
+                $modeId  = $this->firstVarIdByIdent($nodeId, self::THERMOSTAT_MODE_IDENTS);
+                // Only the separate valve actuator has this, not every wall
+                // thermostat -- e.g. Badezimmer_Heizung:4 next to the
+                // configured Badezimmer_Termostat:2. Purely informational.
+                $valveId = $this->firstVarIdByIdentAcrossSiblings($nodeId, self::THERMOSTAT_VALVE_IDENTS);
             } elseif (@IPS_VariableExists($nodeId)) {
                 $sollId = $nodeId;
             }
@@ -1129,6 +1145,7 @@ class RoomDashboard extends IPSModule
                 'ist'         => $istId > 0 ? (float) $this->readVarById($istId) : null,
                 'mode'        => $modeId > 0 ? (string) $this->readVarById($modeId) : null,
                 'modeOptions' => $modeId > 0 ? $this->variableAssociations($modeId) : [],
+                'valve'       => $valveId > 0 ? (float) $this->readVarById($valveId) : null,
             ];
         }
         return $out;
@@ -1492,6 +1509,19 @@ HTML;
             . '</div>';
     }
 
+    /** Radiator valve open-percentage as a small horizontal gauge -- reads from the separate valve actuator device when the configured thermostat itself doesn't have VALVE_STATE (see firstVarIdByIdentAcrossSiblings). */
+    private function renderValveGauge(string $ident, ?float $valvePct): string
+    {
+        if ($valvePct === null) {
+            return '';
+        }
+        $pct    = max(0.0, min(100.0, $valvePct));
+        $pctStr = $this->fmtNum($pct, 0);
+        return "<div class=\"valve-gauge\"><span class=\"cur-label\">Ventil</span>"
+            . "<div class=\"valve-bar\"><div id=\"{$ident}_valve_fill\" class=\"valve-fill\" style=\"width:{$pctStr}%\"></div></div>"
+            . "<span id=\"{$ident}_valve_pct\" class=\"valve-pct\">{$pctStr}%</span></div>";
+    }
+
     private function renderModeButtons(string $ident, array $options, ?string $current): string
     {
         $html = "<div class=\"mode-row\" data-ident=\"{$ident}\">";
@@ -1518,6 +1548,7 @@ HTML;
         if ($t['ist'] !== null) {
             $statsHtml .= $this->renderStatTile($ident . '_ist', 'Ist', $this->fmtNum($t['ist'], 1) . ' °C');
         }
+        $statsHtml .= $this->renderValveGauge($ident, $t['valve'] ?? null);
 
         $modeHtml = count($t['modeOptions']) > 0
             ? $this->renderModeButtons($ident . '_mode', $t['modeOptions'], $t['mode'])
@@ -1747,6 +1778,10 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .cur-tile{display:flex;flex-direction:column;gap:1px;background:#131f33;border-radius:8px;padding:6px 8px}
 .cur-label{font-size:10px;color:#4a6a8a;text-transform:uppercase;letter-spacing:.03em}
 .cur-value{font-size:15px;font-weight:700;color:#d0e8ff}
+.valve-gauge{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
+.valve-bar{width:100%;height:8px;background:#1e2d40;border-radius:4px;overflow:hidden}
+.valve-fill{height:100%;background:#3ba9f5;border-radius:4px;transition:width .3s}
+.valve-pct{font-size:12px;font-weight:700;color:#d0e8ff;text-align:right}
 .pv-block{display:flex;flex-direction:column;gap:8px;flex:none;background:#0f1c30;border-radius:10px;padding:8px}
 .pv-title{font-size:12px;font-weight:700;color:#d0e8ff}
 .pv-title-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -1985,6 +2020,11 @@ window.handleMessage = function(raw) {
       if (dialRoot && t.soll != null) dialRoot._updateVisual(t.soll);
       if (t.ist != null) setText(t.ident + '_ist', t.ist.toFixed(1).replace('.', ',') + ' °C');
       if (t.mode != null) updateModeButtons(t.ident + '_mode', t.mode);
+      if (t.valve != null) {
+        var valveFill = document.getElementById(t.ident + '_valve_fill');
+        if (valveFill) valveFill.style.width = Math.round(t.valve) + '%';
+        setText(t.ident + '_valve_pct', Math.round(t.valve) + '%');
+      }
     });
 
     if (val.humidity) {
