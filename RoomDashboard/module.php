@@ -94,6 +94,24 @@ class RoomDashboard extends IPSModule
         }
     }
 
+    /**
+     * handleMessage() in the tile's JS only ever handles a push whose key is
+     * '__all__' -- it patches every widget from one full state snapshot,
+     * with no branch for anything else. Every forward*Action() below used to
+     * push a narrow, ident-specific key/value instead (e.g.
+     * "thermostat_0_mode"); those pushes were silently dropped on arrival,
+     * so nothing ever updated in the open tile until the next periodic
+     * Refresh() or a full reload -- exactly the "no feedback until reload"
+     * symptom reported live for the thermostat mode buttons (14.09.2026).
+     * Re-collecting and pushing the full state after every action is what
+     * Refresh() already does on its own timer; doing the same right after a
+     * write just makes that update immediate instead of waiting.
+     */
+    private function pushFullState(): void
+    {
+        $this->pushValue('__all__', $this->collectData());
+    }
+
     // ─── IPS action handler ─────────────────────────────────────────────────────
 
     /**
@@ -196,7 +214,7 @@ class RoomDashboard extends IPSModule
         }
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
+        $this->pushFullState();
     }
 
     /**
@@ -217,7 +235,7 @@ class RoomDashboard extends IPSModule
             if ($otherGroupVarId > 0) {
                 RequestAction($otherGroupVarId, $sonosId);
             }
-            $this->pushValue($pushIdent, (string) $targetInstanceId);
+            $this->pushFullState();
             return;
         }
 
@@ -236,7 +254,7 @@ class RoomDashboard extends IPSModule
                 RequestAction($otherGroupVarId, 0);
             }
         }
-        $this->pushValue($pushIdent, '0');
+        $this->pushFullState();
     }
 
     private function forwardListAction(string $listProp, int $index, $value, string $pushIdent, string $column = 'variable'): void
@@ -251,7 +269,7 @@ class RoomDashboard extends IPSModule
         }
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
+        $this->pushFullState();
     }
 
     /**
@@ -310,7 +328,7 @@ class RoomDashboard extends IPSModule
         }
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
+        $this->pushFullState();
     }
 
     /**
@@ -336,7 +354,7 @@ class RoomDashboard extends IPSModule
                 $this->forwardLightAction($i, 'on', $on, 'light_' . $i . '_on');
             }
         }
-        $this->pushValue('lights_all', $on);
+        $this->pushFullState();
     }
 
     /**
@@ -469,14 +487,28 @@ class RoomDashboard extends IPSModule
             if ($target['varId'] <= 0) {
                 return;
             }
-            $cast = $this->castToVarType($target['varId'], $value);
+            $cast       = $this->castToVarType($target['varId'], $value);
+            $moduleGuid = @IPS_GetInstance($target['instanceId'])['ModuleInfo']['ModuleID'] ?? '?';
             if ($this->isActionable($target['varId'])) {
                 RequestAction($target['varId'], $cast);
-            } elseif (!$this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast)) {
-                $this->LogMessage("RoomDashboard forwardThermostatAction: HM_WriteValue* failed for instance {$target['instanceId']} ident {$target['ident']}", KL_ERROR);
-                return;
+            } else {
+                $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
+                // Temporary diagnostic (remove once the CCU write is confirmed reliable, 14.09.2026):
+                // logs every attempt, success or failure, with enough detail to tell a real CCU
+                // rejection apart from a merely-local cache update -- compare the logged
+                // "Wert danach" against the CCU's own display for this datapoint afterwards.
+                $readback = @GetValue($target['varId']);
+                $this->LogMessage(
+                    "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
+                    . 'gesendet ' . var_export($cast, true) . ', HM_WriteValue* meldet ' . ($ok ? 'true' : 'false')
+                    . ', Wert danach ' . var_export($readback, true),
+                    KL_MESSAGE
+                );
+                if (!$ok) {
+                    return;
+                }
             }
-            $this->pushValue($pushIdent, $cast);
+            $this->pushFullState();
             return;
         }
 
@@ -492,7 +524,7 @@ class RoomDashboard extends IPSModule
         }
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
+        $this->pushFullState();
     }
 
     /**
@@ -568,7 +600,7 @@ class RoomDashboard extends IPSModule
         }
         $cast = $this->castToVarType($targetId, $value);
         RequestAction($targetId, $cast);
-        $this->pushValue($pushIdent, $cast);
+        $this->pushFullState();
     }
 
     /** Coerces a value coming from the browser (bool/string/number) to match the target variable's own type. */
