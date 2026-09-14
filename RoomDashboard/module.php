@@ -492,11 +492,23 @@ class RoomDashboard extends IPSModule
             if ($this->isActionable($target['varId'])) {
                 RequestAction($target['varId'], $cast);
             } else {
+                // Temporary diagnostic (remove once the real CCU write path is confirmed, 14.09.2026):
+                // HM_WriteValue* reports success and updates the local value, but the CCU never
+                // receives the change -- IPS logs a systemic "Override of native function
+                // HM_WriteValue* is not implemented. Module: HomeMatic Systemvariablen" warning on
+                // every module reload, which suggests these legacy functions don't actually route
+                // into the official "HomeMatic CCU Device" module at all. Dump every registered
+                // function that could plausibly be the real write path so we stop guessing names.
+                $candidates = array_filter(
+                    get_defined_functions()['user'] ?? [],
+                    fn ($f) => preg_match('/^hm|ccu/i', $f)
+                );
+                $this->LogMessage(
+                    'RoomDashboard verfügbare HM/CCU-Funktionen: ' . implode(', ', $candidates),
+                    KL_MESSAGE
+                );
+
                 $ok = $this->writeHomeMaticValue($target['instanceId'], $target['ident'], $cast);
-                // Temporary diagnostic (remove once the CCU write is confirmed reliable, 14.09.2026):
-                // logs every attempt, success or failure, with enough detail to tell a real CCU
-                // rejection apart from a merely-local cache update -- compare the logged
-                // "Wert danach" against the CCU's own display for this datapoint afterwards.
                 $readback = @GetValue($target['varId']);
                 $this->LogMessage(
                     "RoomDashboard mode write: instance {$target['instanceId']} (Modul {$moduleGuid}), Ident '{$target['ident']}', "
