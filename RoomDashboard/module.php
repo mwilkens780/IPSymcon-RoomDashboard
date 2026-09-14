@@ -523,7 +523,21 @@ class RoomDashboard extends IPSModule
             return;
         }
         $cast = $this->castToVarType($targetId, $value);
+        // Temporary diagnostic (remove once confirmed working, 14.09.2026): user reports a
+        // direct edit of this same IPS variable reaches the CCU3 immediately, but a change
+        // via this dashboard's dial does not -- logging the raw incoming value, the resolved
+        // target, what's actually sent to RequestAction(), and an immediate readback narrows
+        // down whether the dial is sending a wrong/stale value or RequestAction() itself
+        // behaves differently when called from here.
+        $before = @GetValue($targetId);
         RequestAction($targetId, $cast);
+        $after = @GetValue($targetId);
+        $this->LogMessage(
+            "RoomDashboard soll write: instance {$nodeId}, target variable {$targetId}, "
+            . 'roher Wert vom Dial ' . var_export($value, true) . ', gesendet ' . var_export($cast, true)
+            . ', Wert davor ' . var_export($before, true) . ', Wert danach ' . var_export($after, true),
+            KL_MESSAGE
+        );
         $this->pushFullState();
     }
 
