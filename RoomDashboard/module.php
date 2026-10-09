@@ -1285,16 +1285,6 @@ class RoomDashboard extends IPSModule
 
     // ─── Rendering ──────────────────────────────────────────────────────────────
 
-    private function renderStatusBadge(string $id, string $label, ?bool $active, bool $warnWhenActive = false): string
-    {
-        if ($active === null) {
-            return '';
-        }
-        $cls  = $active ? ($warnWhenActive ? 'badge-warn' : 'badge-on') : 'badge-off';
-        $text = htmlspecialchars($label . ($active ? ': an' : ': aus'), ENT_QUOTES);
-        return "<span id=\"{$id}\" class=\"badge {$cls}\">{$text}</span>";
-    }
-
     private function renderSelect(string $ident, array $options, ?string $current, string $cls = 'mode-select'): string
     {
         $optionsHtml = '';
@@ -1328,16 +1318,17 @@ class RoomDashboard extends IPSModule
                 . "<span id=\"{$ident}_brightness_val\" class=\"light-value\">{$val}%</span></div>";
         }
 
-        // 'color': switch + brightness + color picker, uniform regardless of manufacturer.
+        // 'color': icon-switch + brightness + color picker, uniform regardless of manufacturer.
         $checked  = $light['on'] ? ' checked' : '';
+        $onClass  = $light['on'] ? ' on' : '';
         $val      = (int) round($light['brightness'] ?? 0);
         $colorHex = '#' . str_pad(dechex(max(0, (int) ($light['color'] ?? 0))), 6, '0', STR_PAD_LEFT);
         return <<<COLORLIGHT
 <div class="light-tile light-tile-color">
   <div class="light-tile-head">
     <span class="light-name">{$nameEsc}</span>
-    <label class="toggle"><input id="{$ident}_on_input" type="checkbox"{$checked} onchange="requestAction('{$ident}_on', this.checked)">
-      <span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+    <button type="button" id="{$ident}_on_btn" class="icon-toggle{$onClass}" onclick="toggleIconLight('{$ident}')">⏻</button>
+    <input id="{$ident}_on_input" type="checkbox"{$checked} style="display:none">
   </div>
   <div class="light-tile-controls">
     <input id="{$ident}_color_input" type="color" class="color-picker" value="{$colorHex}" onchange="requestAction('{$ident}_color', parseInt(this.value.substring(1),16))">
@@ -1523,9 +1514,9 @@ HTML;
                 'smoke' => ['Ruhe', 'Alarm'], 'siren' => ['Ruhe', 'Alarm'],
             ];
             [$offText, $onText] = $labels[$sensor['type']] ?? ['Aus', 'An'];
-            $cls  = $sensor['bool'] ? 'badge-warn' : 'badge-off';
-            $text = htmlspecialchars(($sensor['bool'] ? $onText : $offText), ENT_QUOTES);
-            return "<div class='cur-tile'><span class='cur-label'>{$icon} {$nameEsc}</span><span class='badge {$cls}' style='align-self:flex-start'>{$text}</span></div>";
+            $color = $sensor['bool'] ? '#f08060' : '#4a6a8a';
+            $text  = htmlspecialchars(($sensor['bool'] ? $onText : $offText), ENT_QUOTES);
+            return "<div class='cur-tile'><span class='cur-label'>{$nameEsc}</span><span class='cur-value' style='color:{$color}'>{$icon} {$text}</span></div>";
         }
 
         $icon = $staticIcons[$sensor['type']] ?? '📟';
@@ -1685,14 +1676,18 @@ THERMO;
             $gridTiles .= $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C');
             $gridTiles .= $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C');
         }
+        if ($humidity['hasCalc'] && $humidity['hint'] !== null) {
+            $hintColor = $humidity['hint'] ? '#f0c060' : '#4a6a8a';
+            $hintIcon  = $humidity['hint'] ? '💨' : '🚪';
+            $hintText  = $humidity['hint'] ? 'Empfohlen' : 'Nicht nötig';
+            $gridTiles .= "<div id=\"humidity_hint\" class=\"cur-tile\"><span class=\"cur-label\">Lüften</span><span id=\"humidity_hint_val\" class=\"cur-value\" style=\"color:{$hintColor}\">{$hintIcon} {$hintText}</span></div>";
+        }
         $gridHtml = $gridTiles !== '' ? "<div class=\"current-grid\">{$gridTiles}</div>" : '';
 
         $calcTextHtml = '';
         if ($humidity['hasCalc']) {
             $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
-            $hintBadge = $this->renderStatusBadge('humidity_hint', 'Lüften empfohlen', $humidity['hint'], true);
-            $calcTextHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>"
-                . "<div class=\"status-row\">{$hintBadge}</div>";
+            $calcTextHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>";
         }
 
         return <<<HUMID
@@ -1774,15 +1769,18 @@ SONOS;
     {
         $d = $this->collectData();
 
-        $presenceBadge = $this->renderStatusBadge('presence_badge', '🧍 Präsenz', $d['presence']);
-        $presenceHtml  = $presenceBadge !== '' ? "<div class=\"status-row\">{$presenceBadge}</div>" : '';
-
         $statusVarsHtml = '';
+        if ($d['presence'] !== null) {
+            $presColor = $d['presence'] ? '#7ee89a' : '#4a6a8a';
+            $presIcon  = $d['presence'] ? '🧍' : '🚶';
+            $presText  = $d['presence'] ? 'Anwesend' : 'Abwesend';
+            $statusVarsHtml .= "<div id=\"presence_badge\" class=\"cur-tile\"><span class=\"cur-label\">Präsenz</span><span id=\"presence_badge_val\" class=\"cur-value\" style=\"color:{$presColor}\">{$presIcon} {$presText}</span></div>";
+        }
         foreach ($d['statusVars'] as $row) {
             $statusVarsHtml .= $this->renderStatusVarTile($row);
         }
-        $statusVarsBlock = ($statusVarsHtml !== '' || $presenceHtml !== '')
-            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div>' . $presenceHtml . '<div class="tile-grid">' . $statusVarsHtml . '</div></div>'
+        $statusVarsBlock = $statusVarsHtml !== ''
+            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div><div class="tile-grid">' . $statusVarsHtml . '</div></div>'
             : '';
 
         $automationsHtml = '';
@@ -1816,12 +1814,15 @@ SONOS;
             $isOn = $l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) ($l['on'] ?? false);
             return $carry || $isOn;
         }, false);
-        $allLightsToggle = count($d['lights']) > 1
-            ? '<label class="toggle"><input id="lights_all_input" type="checkbox"' . ($allLightsOn ? ' checked' : '')
-                . ' onchange="requestAction(\'lights_all\', this.checked)"><span class="toggle-track"><span class="toggle-thumb"></span></span></label>'
+        $allLightsOnClass = $allLightsOn ? ' on' : '';
+        $allLightsChecked = $allLightsOn ? ' checked' : '';
+        $allLightsTile = count($d['lights']) > 1
+            ? "<div id=\"lights_all\" class=\"light-tile clickable{$allLightsOnClass}\" onclick=\"toggleFlatSwitch('lights_all')\">"
+                . "<span class=\"light-name\">Alle Lichter</span><span class=\"tile-icon\">⏻</span>"
+                . "<input id=\"lights_all_input\" type=\"checkbox\"{$allLightsChecked} style=\"display:none\"></div>"
             : '';
         $lightsBlock = $lightsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title pv-title-row"><span>💡 Lichter</span>' . $allLightsToggle . '</div><div class="tile-grid">' . $lightsHtml . '</div></div>'
+            ? '<div class="pv-block"><div class="pv-title">💡 Lichter</div><div class="tile-grid">' . $allLightsTile . $lightsHtml . '</div></div>'
             : '';
 
         $shuttersHtml = '';
@@ -1888,10 +1889,13 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .valve-pct{font-size:12px;font-weight:700;color:#d0e8ff;text-align:right}
 .pv-block{display:flex;flex-direction:column;gap:8px;flex:none;background:#0f1c30;border-radius:10px;padding:8px}
 .pv-title{font-size:12px;font-weight:700;color:#d0e8ff}
-.pv-title-row{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .mode-select{width:100%;background:#131f33;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:6px 8px;font-size:12px}
-.light-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
+.light-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px;border:1px solid #1e3a5f}
 .light-name{font-size:11px;color:#8aa8c8}
+/* Kompakter Icon-Schalter fuer Kacheln mit weiteren eigenen Klickzielen (Farb-/Dimmer-Licht) --
+   moderner als die lange Pille, aber kein Whole-Tile-Click, da Slider/Farbwahl daneben sitzen. */
+.icon-toggle{width:28px;height:28px;flex:none;border-radius:8px;border:1px solid #2a3a50;background:#1a2535;color:#8aa8c8;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background-color .15s,color .15s,border-color .15s}
+.icon-toggle.on{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
 .light-value{font-size:10px;color:#4a6a8a;align-self:flex-end}
 .light-slider{width:100%;accent-color:#7ec8f0}
 /* Reine Schalter-Kacheln (Licht an/aus, Bool-Automation): die ganze Kachel ist der Button,
@@ -1997,6 +2001,15 @@ function toggleFlatSwitch(ident) {
   if (input) input.checked = next;
   if (tile) tile.classList.toggle('on', next);
   requestAction(ident, next);
+}
+
+function toggleIconLight(ident) {
+  var input = document.getElementById(ident + '_on_input');
+  var btn = document.getElementById(ident + '_on_btn');
+  var next = input ? !input.checked : true;
+  if (input) input.checked = next;
+  if (btn) btn.classList.toggle('on', next);
+  requestAction(ident + '_on', next);
 }
 
 function statusVarSelect(ident, value, btn) {
@@ -2121,10 +2134,10 @@ window.handleMessage = function(raw) {
     state = val;
     setText('updated', 'Stand ' + val.updated);
 
-    var presenceBadge = document.getElementById('presence_badge');
-    if (presenceBadge && val.presence != null) {
-      presenceBadge.className = 'badge ' + (val.presence ? 'badge-on' : 'badge-off');
-      presenceBadge.textContent = '🧍 Präsenz: ' + (val.presence ? 'an' : 'aus');
+    var presenceVal = document.getElementById('presence_badge_val');
+    if (presenceVal && val.presence != null) {
+      presenceVal.style.color = val.presence ? '#7ee89a' : '#4a6a8a';
+      presenceVal.textContent = (val.presence ? '🧍 Anwesend' : '🚶 Abwesend');
     }
 
     (val.statusVars || []).forEach(function(row) {
@@ -2153,10 +2166,10 @@ window.handleMessage = function(raw) {
       setText('humidity_result', val.humidity.result || '–');
       setText('humidity_dp_out', val.humidity.dewPointOut != null ? val.humidity.dewPointOut.toFixed(1).replace('.', ',') + ' °C' : '–');
       setText('humidity_dp_in', val.humidity.dewPointIn != null ? val.humidity.dewPointIn.toFixed(1).replace('.', ',') + ' °C' : '–');
-      var hintBadge = document.getElementById('humidity_hint');
-      if (hintBadge && val.humidity.hint != null) {
-        hintBadge.className = 'badge ' + (val.humidity.hint ? 'badge-warn' : 'badge-off');
-        hintBadge.textContent = 'Lüften empfohlen' + (val.humidity.hint ? ': an' : ': aus');
+      var hintVal = document.getElementById('humidity_hint_val');
+      if (hintVal && val.humidity.hint != null) {
+        hintVal.style.color = val.humidity.hint ? '#f0c060' : '#4a6a8a';
+        hintVal.textContent = (val.humidity.hint ? '💨 Empfohlen' : '🚪 Nicht nötig');
       }
     }
 
@@ -2188,6 +2201,8 @@ window.handleMessage = function(raw) {
       if (onInput && light.on != null) onInput.checked = light.on;
       var onTile = document.getElementById(light.ident + '_on');
       if (onTile && light.on != null) onTile.classList.toggle('on', !!light.on);
+      var onBtn = document.getElementById(light.ident + '_on_btn');
+      if (onBtn && light.on != null) onBtn.classList.toggle('on', !!light.on);
       var range = document.getElementById(light.ident + '_brightness_range');
       var lbl = document.getElementById(light.ident + '_brightness_val');
       if (range && light.brightness != null) range.value = Math.round(light.brightness);
