@@ -1314,9 +1314,10 @@ class RoomDashboard extends IPSModule
 
         if ($light['kind'] === 'switch') {
             $checked = $light['on'] ? ' checked' : '';
-            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-                . "<label class=\"toggle\"><input id=\"{$ident}_on_input\" type=\"checkbox\"{$checked} onchange=\"requestAction('{$ident}_on', this.checked)\">"
-                . '<span class="toggle-track"><span class="toggle-thumb"></span></span></label></div>';
+            $onClass = $light['on'] ? ' on' : '';
+            return "<div id=\"{$ident}_on\" class=\"light-tile clickable{$onClass}\" onclick=\"toggleFlatSwitch('{$ident}_on')\">"
+                . "<span class=\"light-name\">{$nameEsc}</span><span class=\"tile-icon\">⏻</span>"
+                . "<input id=\"{$ident}_on_input\" type=\"checkbox\"{$checked} style=\"display:none\"></div>";
         }
 
         if ($light['kind'] === 'dimmer') {
@@ -1358,7 +1359,7 @@ COLORLIGHT;
             // only open/stop/close actions, no slider.
             return <<<UPDOWN
 <div class="shutter-tile">
-  <span class="light-name">{$nameEsc}</span>
+  <span class="light-name">🪟 {$nameEsc}</span>
   <div class="shutter-btns">
     <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_state', 'open')">▲ Auf</button>
     <button type="button" class="shutter-btn shutter-btn-stop" onclick="requestAction('{$ident}_state', 'stop')">■</button>
@@ -1372,7 +1373,7 @@ UPDOWN;
         return <<<POSITION
 <div class="shutter-tile">
   <div class="shutter-head">
-    <span class="light-name">{$nameEsc}</span>
+    <span class="light-name">🪟 {$nameEsc}</span>
     <span id="{$ident}_val" class="light-value">{$val}% zu</span>
   </div>
   <div class="shutter-btns">
@@ -1391,9 +1392,10 @@ POSITION;
             $nameEsc = htmlspecialchars($a['name'], ENT_QUOTES);
             $ident   = $a['ident'];
             $checked = $a['on'] ? ' checked' : '';
-            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-                . "<label class=\"toggle\"><input id=\"{$ident}_input\" type=\"checkbox\"{$checked} onchange=\"requestAction('{$ident}', this.checked)\">"
-                . '<span class="toggle-track"><span class="toggle-thumb"></span></span></label></div>';
+            $onClass = $a['on'] ? ' on' : '';
+            return "<div id=\"{$ident}\" class=\"light-tile clickable{$onClass}\" onclick=\"toggleFlatSwitch('{$ident}')\">"
+                . "<span class=\"light-name\">{$nameEsc}</span><span class=\"tile-icon\">⏻</span>"
+                . "<input id=\"{$ident}_input\" type=\"checkbox\"{$checked} style=\"display:none\"></div>";
         }
         // Reuses the exact same button-group/read-only rendering as status variables.
         return $this->renderStatusVarTile($a);
@@ -1402,7 +1404,8 @@ POSITION;
     private function renderAlarmBadge(string $label, bool $active): string
     {
         $cls  = $active ? 'badge-warn' : 'badge-off';
-        $text = htmlspecialchars($label . ': ' . ($active ? 'Alarm' : 'OK'), ENT_QUOTES);
+        $icon = $active ? '🚨' : '🔕';
+        $text = htmlspecialchars($icon . ' ' . $label . ': ' . ($active ? 'Alarm' : 'OK'), ENT_QUOTES);
         return "<span class=\"badge {$cls}\">{$text}</span>";
     }
 
@@ -1504,10 +1507,17 @@ HTML;
     private function renderSensorTile(array $sensor): string
     {
         $nameEsc = htmlspecialchars($sensor['name'], ENT_QUOTES);
-        $icons   = ['window' => '🪟', 'door' => '🚪', 'humidity' => '💧', 'smoke' => '🔥', 'siren' => '🚨', 'generic' => '📟'];
-        $icon    = $icons[$sensor['type']] ?? '📟';
+        $staticIcons = ['humidity' => '💧', 'generic' => '📟'];
+        // Fenster/Tür/Rauch/Sirene zeigen statt eines fixen Symbols ein
+        // zustandsabhaengiges Icon-Paar (offen/zu, Alarm/Ruhe) -- gleiche
+        // Konvention wie Home- und Alarm-Dashboard.
+        $stateIcons = [
+            'window' => ['🔒', '🔓'], 'door' => ['🔒', '🔓'],
+            'smoke'  => ['🔕', '🚨'], 'siren' => ['🔕', '🚨'],
+        ];
 
         if ($sensor['bool'] !== null) {
+            $icon = ($stateIcons[$sensor['type']] ?? ['📟', '📟'])[(int) $sensor['bool']];
             $labels = [
                 'window' => ['Zu', 'Offen'], 'door' => ['Zu', 'Offen'],
                 'smoke' => ['Ruhe', 'Alarm'], 'siren' => ['Ruhe', 'Alarm'],
@@ -1518,6 +1528,7 @@ HTML;
             return "<div class='cur-tile'><span class='cur-label'>{$icon} {$nameEsc}</span><span class='badge {$cls}' style='align-self:flex-start'>{$text}</span></div>";
         }
 
+        $icon = $staticIcons[$sensor['type']] ?? '📟';
         $unit = $sensor['type'] === 'humidity' ? ' %' : '';
         $valStr = $this->fmtNum($sensor['value'], 1) . $unit;
         return $this->renderStatTile('', "{$icon} {$nameEsc}", $valStr);
@@ -1883,6 +1894,14 @@ body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemF
 .light-name{font-size:11px;color:#8aa8c8}
 .light-value{font-size:10px;color:#4a6a8a;align-self:flex-end}
 .light-slider{width:100%;accent-color:#7ec8f0}
+/* Reine Schalter-Kacheln (Licht an/aus, Bool-Automation): die ganze Kachel ist der Button,
+   kein eingebetteter Zweit-Schalter -- Dimmer/Farb-Kacheln behalten ihren echten Schalter,
+   da dort Slider/Farbwahl eigene Klickziele in derselben Kachel brauchen. */
+.light-tile.clickable{flex-direction:row;align-items:center;justify-content:space-between;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;transition:background-color .15s,transform .08s;border:1px solid #1e3a5f}
+.light-tile.clickable:active{transform:scale(.97)}
+.light-tile.clickable .tile-icon{font-size:15px;color:#4a6a8a;flex:none;transition:color .15s}
+.light-tile.clickable.on{background:#1a3448;border-color:#2a7aa0}
+.light-tile.clickable.on .tile-icon{color:#7ec8f0}
 .toggle{position:relative;width:44px;height:24px;flex:none;display:inline-block}
 .toggle input{opacity:0;position:absolute;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
 .toggle-track{position:absolute;inset:0;background:#1a2535;border:1px solid #2a3a50;border-radius:12px;transition:.15s}
@@ -1969,6 +1988,15 @@ function sonosTogglePlay() {
   var btn = document.getElementById('sonos_playpause');
   var playing = btn.getAttribute('data-playing') === '1';
   requestAction('sonos_status', playing ? 3 : 2); // Pause : Play
+}
+
+function toggleFlatSwitch(ident) {
+  var input = document.getElementById(ident + '_input');
+  var tile = document.getElementById(ident);
+  var next = input ? !input.checked : true;
+  if (input) input.checked = next;
+  if (tile) tile.classList.toggle('on', next);
+  requestAction(ident, next);
 }
 
 function statusVarSelect(ident, value, btn) {
@@ -2158,6 +2186,8 @@ window.handleMessage = function(raw) {
     (val.lights || []).forEach(function(light) {
       var onInput = document.getElementById(light.ident + '_on_input');
       if (onInput && light.on != null) onInput.checked = light.on;
+      var onTile = document.getElementById(light.ident + '_on');
+      if (onTile && light.on != null) onTile.classList.toggle('on', !!light.on);
       var range = document.getElementById(light.ident + '_brightness_range');
       var lbl = document.getElementById(light.ident + '_brightness_val');
       if (range && light.brightness != null) range.value = Math.round(light.brightness);
@@ -2185,6 +2215,8 @@ window.handleMessage = function(raw) {
     (val.automations || []).forEach(function(a) {
       var input = document.getElementById(a.ident + '_input');
       if (input && a.on != null) input.checked = a.on;
+      var tile = document.getElementById(a.ident);
+      if (tile && a.on != null) tile.classList.toggle('on', !!a.on);
       var group = document.getElementById(a.ident + '_group');
       if (group) {
         Array.prototype.forEach.call(group.children, function(b) {
