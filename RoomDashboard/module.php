@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 class RoomDashboard extends IPSModule
 {
-    private const SENSOR_BOOL_TYPES = ['window', 'door', 'smoke', 'siren'];
+    private const SENSOR_BOOL_TYPES = ['window', 'door', 'smoke', 'siren', 'presence'];
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -1499,22 +1499,27 @@ HTML;
     {
         $nameEsc = htmlspecialchars($sensor['name'], ENT_QUOTES);
         $staticIcons = ['humidity' => '💧', 'generic' => '📟'];
-        // Fenster/Tür/Rauch/Sirene zeigen statt eines fixen Symbols ein
-        // zustandsabhaengiges Icon-Paar (offen/zu, Alarm/Ruhe) -- gleiche
-        // Konvention wie Home- und Alarm-Dashboard.
+        // Fenster/Tür/Rauch/Sirene/Präsenz zeigen statt eines fixen Symbols
+        // ein zustandsabhaengiges Icon-Paar (offen/zu, Alarm/Ruhe,
+        // anwesend/abwesend) -- gleiche Konvention wie Home- und Alarm-
+        // Dashboard. Präsenz ist (anders als die anderen) im "true"-Zustand
+        // nicht alarmierend, sondern normal -- eigene gruene statt rote Farbe.
         $stateIcons = [
             'window' => ['🔒', '🔓'], 'door' => ['🔒', '🔓'],
             'smoke'  => ['🔕', '🚨'], 'siren' => ['🔕', '🚨'],
+            'presence' => ['🚶', '🧍'],
         ];
+        $trueColors = ['presence' => '#7ee89a'];
 
         if ($sensor['bool'] !== null) {
             $icon = ($stateIcons[$sensor['type']] ?? ['📟', '📟'])[(int) $sensor['bool']];
             $labels = [
                 'window' => ['Zu', 'Offen'], 'door' => ['Zu', 'Offen'],
                 'smoke' => ['Ruhe', 'Alarm'], 'siren' => ['Ruhe', 'Alarm'],
+                'presence' => ['Abwesend', 'Anwesend'],
             ];
             [$offText, $onText] = $labels[$sensor['type']] ?? ['Aus', 'An'];
-            $color = $sensor['bool'] ? '#f08060' : '#4a6a8a';
+            $color = $sensor['bool'] ? ($trueColors[$sensor['type']] ?? '#f08060') : '#4a6a8a';
             $text  = htmlspecialchars(($sensor['bool'] ? $onText : $offText), ENT_QUOTES);
             return "<div class='cur-tile'><span class='cur-label'>{$nameEsc}</span><span class='cur-value' style='color:{$color}'>{$icon} {$text}</span></div>";
         }

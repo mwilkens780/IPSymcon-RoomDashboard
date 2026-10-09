@@ -185,6 +185,7 @@
               { "caption": "Feuchtigkeit (%)", "value": "humidity" },
               { "caption": "Rauchmelder", "value": "smoke" },
               { "caption": "Sirene", "value": "siren" },
+              { "caption": "Präsenz/Bewegung", "value": "presence" },
               { "caption": "Sonstiges (Zahl)", "value": "generic" }
             ]
           }
