@@ -2,8 +2,12 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../libs/TileKit.php';
+
 class RoomDashboard extends IPSModule
 {
+    use \Fuchsbau\TileKit\RoomDashboard\TileKit;
+
     private const SENSOR_BOOL_TYPES = ['window', 'door', 'smoke', 'siren', 'presence'];
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -85,8 +89,7 @@ class RoomDashboard extends IPSModule
     public function Refresh(): void
     {
         try {
-            $data = $this->collectData();
-            $this->pushValue('__all__', $data);
+            $this->pushFullState();
             $this->SetStatus(102);
         } catch (\Throwable $e) {
             $this->LogMessage('RoomDashboard Refresh: ' . $e->getMessage(), KL_ERROR);
@@ -109,7 +112,7 @@ class RoomDashboard extends IPSModule
      */
     private function pushFullState(): void
     {
-        $this->pushValue('__all__', $this->collectData());
+        $this->tkPush('__all__', $this->ops($this->view($this->collectData())));
     }
 
     // ─── IPS action handler ─────────────────────────────────────────────────────
@@ -123,6 +126,8 @@ class RoomDashboard extends IPSModule
     public function RequestAction($Ident, $Value): void
     {
         try {
+            // TileKit-Schalter senden '<ident>_toggle'
+            $Ident = (string) preg_replace('/_toggle$/', '', (string) $Ident);
             if (strpos($Ident, 'sonos_') === 0) {
                 $this->forwardSonosAction(substr($Ident, strlen('sonos_')), $Value, $Ident);
                 return;
@@ -681,11 +686,6 @@ class RoomDashboard extends IPSModule
     }
 
     // ─── Private helpers ──────────────────────────────────────────────────────
-
-    private function pushValue(string $key, $value): void
-    {
-        $this->UpdateVisualizationValue(json_encode(['key' => $key, 'value' => $value]));
-    }
 
     private function readVarById(int $id)
     {
@@ -1283,300 +1283,414 @@ class RoomDashboard extends IPSModule
         ];
     }
 
-    // ─── Rendering ──────────────────────────────────────────────────────────────
+    // ─── Rendering (TileKit, siehe docs/ui-kachel.md im Workspace) ─────────────
+    //
+    // view() beschreibt den Raum als Gruppen von Kacheln. Daraus entstehen
+    // sowohl das HTML (renderTile) als auch die Live-Updates (ops) – dieselbe
+    // Quelle, damit Erstrender und Push nie auseinanderlaufen.
 
-    private function renderSelect(string $ident, array $options, ?string $current, string $cls = 'mode-select'): string
+    private const SENSOR_VIEW = [
+        // Typ => [Icon aus, Icon an, Text aus, Text an, Zustand bei "an"]
+        'window'   => ['🔒', '🔓', 'Zu', 'Offen', 'warn'],
+        'door'     => ['🔒', '🔓', 'Zu', 'Offen', 'warn'],
+        'smoke'    => ['✅', '🔥', 'Ruhe', 'Alarm', 'alarm'],
+        'siren'    => ['🔕', '🚨', 'Ruhe', 'Alarm', 'alarm'],
+        'presence' => ['🚶', '🏠', 'Abwesend', 'Anwesend', 'ok'],
+    ];
+
+    private const FAN_SPEEDS = [1000 => 'Leise', 0 => 'Normal', 1 => 'Stark', 2 => 'Max+'];
+
+    private function view(array $d): array
     {
-        $optionsHtml = '';
-        foreach ($options as $opt) {
-            $value    = (string) $opt['Value'];
-            $selected = $current !== null && $value === $current ? ' selected' : '';
-            $optionsHtml .= '<option value="' . htmlspecialchars($value, ENT_QUOTES) . '"' . $selected . '>'
-                . htmlspecialchars($opt['Name'], ENT_QUOTES) . '</option>';
-        }
-        return "<select id=\"{$ident}_select\" class=\"{$cls}\" onchange=\"requestAction('{$ident}', this.value)\">{$optionsHtml}</select>";
-    }
-
-    private function renderLightTile(array $light): string
-    {
-        $nameEsc = htmlspecialchars($light['name'], ENT_QUOTES);
-        $ident   = $light['ident'];
-
-        if ($light['kind'] === 'switch') {
-            $checked = $light['on'] ? ' checked' : '';
-            $onClass = $light['on'] ? ' on' : '';
-            return "<div id=\"{$ident}_on\" class=\"light-tile clickable{$onClass}\" onclick=\"toggleFlatSwitch('{$ident}_on')\">"
-                . "<span class=\"light-name\">{$nameEsc}</span><span class=\"tile-icon\">⏻</span>"
-                . "<input id=\"{$ident}_on_input\" type=\"checkbox\"{$checked} style=\"display:none\"></div>";
-        }
-
-        if ($light['kind'] === 'dimmer') {
-            $val = (int) round($light['brightness'] ?? 0);
-            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-                . "<input id=\"{$ident}_brightness_range\" type=\"range\" min=\"0\" max=\"100\" value=\"{$val}\" class=\"light-slider\" "
-                . "oninput=\"document.getElementById('{$ident}_brightness_val').textContent=this.value+'%'\" onchange=\"requestAction('{$ident}_brightness', parseInt(this.value))\">"
-                . "<span id=\"{$ident}_brightness_val\" class=\"light-value\">{$val}%</span></div>";
-        }
-
-        // 'color': icon-switch + brightness + color picker, uniform regardless of manufacturer.
-        $checked  = $light['on'] ? ' checked' : '';
-        $onClass  = $light['on'] ? ' on' : '';
-        $val      = (int) round($light['brightness'] ?? 0);
-        $colorHex = '#' . str_pad(dechex(max(0, (int) ($light['color'] ?? 0))), 6, '0', STR_PAD_LEFT);
-        return <<<COLORLIGHT
-<div class="light-tile light-tile-color">
-  <div class="light-tile-head">
-    <span class="light-name">{$nameEsc}</span>
-    <button type="button" id="{$ident}_on_btn" class="icon-toggle{$onClass}" onclick="toggleIconLight('{$ident}')">⏻</button>
-    <input id="{$ident}_on_input" type="checkbox"{$checked} style="display:none">
-  </div>
-  <div class="light-tile-controls">
-    <input id="{$ident}_color_input" type="color" class="color-picker" value="{$colorHex}" onchange="requestAction('{$ident}_color', parseInt(this.value.substring(1),16))">
-    <input id="{$ident}_brightness_range" type="range" min="0" max="100" value="{$val}" class="light-slider"
-      oninput="document.getElementById('{$ident}_brightness_val').textContent=this.value+'%'" onchange="requestAction('{$ident}_brightness', parseInt(this.value))">
-    <span id="{$ident}_brightness_val" class="light-value">{$val}%</span>
-  </div>
-</div>
-COLORLIGHT;
-    }
-
-    private function renderShutterTile(array $shutter): string
-    {
-        $nameEsc = htmlspecialchars($shutter['name'], ENT_QUOTES);
-        $ident   = $shutter['ident'];
-
-        if ($shutter['kind'] === 'updown') {
-            // No position feedback exists for RTS/unidirectional covers --
-            // only open/stop/close actions, no slider.
-            return <<<UPDOWN
-<div class="shutter-tile">
-  <span class="light-name">🪟 {$nameEsc}</span>
-  <div class="shutter-btns">
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_state', 'open')">▲ Auf</button>
-    <button type="button" class="shutter-btn shutter-btn-stop" onclick="requestAction('{$ident}_state', 'stop')">■</button>
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_state', 'closed')">▼ Zu</button>
-  </div>
-</div>
-UPDOWN;
-        }
-
-        $val = (int) round($shutter['value']);
-        return <<<POSITION
-<div class="shutter-tile">
-  <div class="shutter-head">
-    <span class="light-name">🪟 {$nameEsc}</span>
-    <span id="{$ident}_val" class="light-value">{$val}% zu</span>
-  </div>
-  <div class="shutter-btns">
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_position', 0)">▲ Auf</button>
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_position', 100)">▼ Zu</button>
-  </div>
-  <input id="{$ident}_range" type="range" min="0" max="100" value="{$val}" class="light-slider"
-    oninput="document.getElementById('{$ident}_val').textContent=this.value+'% zu'" onchange="requestAction('{$ident}_position', parseInt(this.value))">
-</div>
-POSITION;
-    }
-
-    private function renderAutomationTile(array $a): string
-    {
-        if ($a['isBool']) {
-            $nameEsc = htmlspecialchars($a['name'], ENT_QUOTES);
-            $ident   = $a['ident'];
-            $checked = $a['on'] ? ' checked' : '';
-            $onClass = $a['on'] ? ' on' : '';
-            return "<div id=\"{$ident}\" class=\"light-tile clickable{$onClass}\" onclick=\"toggleFlatSwitch('{$ident}')\">"
-                . "<span class=\"light-name\">{$nameEsc}</span><span class=\"tile-icon\">⏻</span>"
-                . "<input id=\"{$ident}_input\" type=\"checkbox\"{$checked} style=\"display:none\"></div>";
-        }
-        // Reuses the exact same button-group/read-only rendering as status variables.
-        return $this->renderStatusVarTile($a);
-    }
-
-    private function renderAlarmBadge(string $label, bool $active): string
-    {
-        $cls  = $active ? 'badge-warn' : 'badge-off';
-        $icon = $active ? '🚨' : '🔕';
-        $text = htmlspecialchars($icon . ' ' . $label . ': ' . ($active ? 'Alarm' : 'OK'), ENT_QUOTES);
-        return "<span class=\"badge {$cls}\">{$text}</span>";
-    }
-
-    /**
-     * With only one detector configured, the "🚨 Rauchmelder" section title
-     * already says what this is -- repeating the device's own name inside
-     * would just be a redundant nesting level, so it's only shown once
-     * there's more than one to tell apart.
-     */
-    private function renderSmokeDetectorTile(array $d, bool $showName): string
-    {
-        $nameHtml = $showName ? '<div class="light-name">🚨 ' . htmlspecialchars($d['name'], ENT_QUOTES) . '</div>' : '';
-
-        if ($d['kind'] !== 'nest') {
-            return "<div class=\"light-tile\">{$nameHtml}"
-                . $this->renderAlarmBadge('Alarm', $d['alarm']) . '</div>';
-        }
-
-        $badges = $this->renderAlarmBadge('Rauch', $d['smoke']);
-        if ($d['co'] !== null) {
-            $badges .= $this->renderAlarmBadge('CO', $d['co']);
-        }
-        if ($d['heat'] !== null) {
-            $badges .= $this->renderAlarmBadge('Hitze', $d['heat']);
-        }
-        if ($d['hushed'] === true) {
-            $badges .= '<span class="badge badge-warn">Stummgeschaltet</span>';
-        }
-
-        $statsHtml = '';
-        if ($d['battery'] !== null) {
-            $statsHtml .= $this->renderStatTile('', 'Batterie', $d['battery'] . ' %');
-        }
-        if ($d['wired'] !== null) {
-            $statsHtml .= $this->renderStatTile('', 'Stromversorgung', $d['wired'] ? 'Netzstrom' : 'Batterie');
-        }
-        $statsBlock = $statsHtml !== '' ? "<div class=\"current-grid\">{$statsHtml}</div>" : '';
-
-        $footerParts = [];
-        if ($d['lastTest'] !== null) {
-            $footerParts[] = 'Letzter Test: ' . htmlspecialchars(date('d.m.Y', $d['lastTest']), ENT_QUOTES);
-        }
-        if ($d['replaceBy'] !== null) {
-            $footerParts[] = 'Austausch: ' . htmlspecialchars(date('m/Y', $d['replaceBy']), ENT_QUOTES);
-        }
-        $footer = $footerParts !== [] ? '<div class="smoke-footer">' . implode(' &middot; ', $footerParts) . '</div>' : '';
-
-        return <<<NEST
-<div class="smoke-tile">
-  {$nameHtml}
-  <div class="status-row">{$badges}</div>
-  {$statsBlock}
-  {$footer}
-</div>
-NEST;
-    }
-
-    private function renderVacuumTile(array $v): string
-    {
-        $ident   = $v['ident'];
-        $nameEsc = htmlspecialchars($v['name'], ENT_QUOTES);
-        $stateEsc = htmlspecialchars($v['state'], ENT_QUOTES);
-        $battery = $v['battery'];
-        $batteryColor = $battery <= 20 ? '#f08060' : ($battery <= 50 ? '#e0b356' : '#7ec8f0');
-        $chargeIcon = $v['charging'] ? ' ⚡' : '';
-
-        $speedLabels = [1000 => 'Leise', 0 => 'Normal', 1 => 'Stark', 2 => 'Max+'];
-        $speedButtons = '';
-        foreach ($speedLabels as $level => $label) {
-            $active = $v['fanSpeed'] === $level ? 'status-btn-active' : '';
-            $speedButtons .= "<button type=\"button\" class=\"status-btn {$active}\" onclick=\"requestAction('{$ident}_fanspeed', {$level})\">{$label}</button>";
-        }
-
-        $lastCleanHtml = $v['lastClean'] !== ''
-            ? '<div class="smoke-footer">' . htmlspecialchars($v['lastClean'], ENT_QUOTES) . '</div>'
-            : '';
-
-        return <<<HTML
-<div class="vacuum-tile">
-  <div class="vacuum-head">
-    <span class="light-name">🤖 {$nameEsc}</span>
-    <span class="badge badge-off">{$stateEsc}</span>
-  </div>
-  <div class="current-grid">
-    <div class='cur-tile'><span class='cur-label'>Batterie</span><span class='cur-value' style="color:{$batteryColor}">{$battery}%{$chargeIcon}</span></div>
-  </div>
-  <div class="shutter-btns">
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_clean', 1)" title="Start/Fortsetzen">▶️</button>
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_pause', 1)" title="Pause">⏸</button>
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_stop', 1)" title="Stopp">⏹</button>
-    <button type="button" class="shutter-btn" onclick="requestAction('{$ident}_dock', 1)" title="Zur Basis">🏠</button>
-  </div>
-  <div class="status-btn-group">{$speedButtons}</div>
-  {$lastCleanHtml}
-</div>
-HTML;
-    }
-
-    private function renderSensorTile(array $sensor): string
-    {
-        $nameEsc = htmlspecialchars($sensor['name'], ENT_QUOTES);
-        $staticIcons = ['humidity' => '💧', 'generic' => '📟'];
-        // Fenster/Tür/Rauch/Sirene/Präsenz zeigen statt eines fixen Symbols
-        // ein zustandsabhaengiges Icon-Paar (offen/zu, Alarm/Ruhe,
-        // anwesend/abwesend) -- gleiche Konvention wie Home- und Alarm-
-        // Dashboard. Präsenz ist (anders als die anderen) im "true"-Zustand
-        // nicht alarmierend, sondern normal -- eigene gruene statt rote Farbe.
-        $stateIcons = [
-            'window' => ['🔒', '🔓'], 'door' => ['🔒', '🔓'],
-            'smoke'  => ['🔕', '🚨'], 'siren' => ['🔕', '🚨'],
-            'presence' => ['🚶', '🧍'],
-        ];
-        $trueColors = ['presence' => '#7ee89a'];
-
-        if ($sensor['bool'] !== null) {
-            $icon = ($stateIcons[$sensor['type']] ?? ['📟', '📟'])[(int) $sensor['bool']];
-            $labels = [
-                'window' => ['Zu', 'Offen'], 'door' => ['Zu', 'Offen'],
-                'smoke' => ['Ruhe', 'Alarm'], 'siren' => ['Ruhe', 'Alarm'],
-                'presence' => ['Abwesend', 'Anwesend'],
-            ];
-            [$offText, $onText] = $labels[$sensor['type']] ?? ['Aus', 'An'];
-            $color = $sensor['bool'] ? ($trueColors[$sensor['type']] ?? '#f08060') : '#4a6a8a';
-            $text  = htmlspecialchars(($sensor['bool'] ? $onText : $offText), ENT_QUOTES);
-            return "<div class='cur-tile'><span class='cur-label'>{$nameEsc}</span><span class='cur-value' style='color:{$color}'>{$icon} {$text}</span></div>";
-        }
-
-        $icon = $staticIcons[$sensor['type']] ?? '📟';
-        $unit = $sensor['type'] === 'humidity' ? ' %' : '';
-        $valStr = $this->fmtNum($sensor['value'], 1) . $unit;
-        return $this->renderStatTile('', "{$icon} {$nameEsc}", $valStr);
-    }
-
-    private function renderStatTile(string $id, string $label, string $value): string
-    {
-        $idAttr = $id !== '' ? " id=\"{$id}\"" : '';
-        return "<div class='cur-tile'><span class='cur-label'>{$label}</span><span{$idAttr} class='cur-value'>{$value}</span></div>";
-    }
-
-    private function renderStatusVarTile(array $row): string
-    {
-        $nameEsc = htmlspecialchars($row['name'], ENT_QUOTES);
-        if (count($row['options']) > 0) {
-            $buttonsHtml = '';
-            foreach ($row['options'] as $opt) {
-                $value    = (string) $opt['Value'];
-                $active   = $value === $row['value'] ? ' status-btn-active' : '';
-                $valueEsc = htmlspecialchars($value, ENT_QUOTES);
-                $labelEsc = htmlspecialchars($opt['Name'], ENT_QUOTES);
-                $buttonsHtml .= "<button type=\"button\" class=\"status-btn{$active}\" data-value=\"{$valueEsc}\" "
-                    . "onclick=\"statusVarSelect('{$row['ident']}', '{$valueEsc}', this)\">{$labelEsc}</button>";
+        $groups = [];
+        $add    = static function (string $name, array $tiles) use (&$groups): void {
+            if (count($tiles) > 0) {
+                $groups[] = ['name' => $name, 'tiles' => $tiles];
             }
-            return "<div class=\"light-tile\"><span class=\"light-name\">{$nameEsc}</span>"
-                . "<div class=\"status-btn-group\" id=\"{$row['ident']}_group\">{$buttonsHtml}</div></div>";
+        };
+
+        // Klima: Thermostate + Luftfeuchte/Lueften
+        $klima = [];
+        foreach ($d['thermostats'] as $t) {
+            $klima[] = ['kind' => 'thermo', 'id' => $t['ident'], 'name' => count($d['thermostats']) > 1 ? $t['name'] : '',
+                'soll' => $t['soll'], 'ist' => $t['ist'] !== null ? $this->fmtNum($t['ist'], 1) . ' °C' : null,
+                'valve' => $t['valve'] !== null ? (int) round(max(0, min(100, $t['valve']))) : null,
+                'mode' => $t['mode'], 'options' => $t['modeOptions']];
         }
-        return $this->renderStatTile('', $nameEsc, htmlspecialchars($row['value'], ENT_QUOTES));
+        $h = $d['humidity'];
+        if ($h !== null) {
+            if ($h['sensor'] !== null) {
+                $klima[] = ['kind' => 'value', 'id' => 'hum_sensor', 'name' => 'Luftfeuchte', 'text' => $this->fmtNum($h['sensor'], 1) . ' %'];
+            }
+            if ($h['hasCalc'] && ($h['dewPointOut'] !== null || $h['dewPointIn'] !== null)) {
+                $klima[] = ['kind' => 'value', 'id' => 'hum_dp_out', 'name' => 'Taupunkt außen', 'text' => $this->fmtNum($h['dewPointOut'], 1) . ' °C'];
+                $klima[] = ['kind' => 'value', 'id' => 'hum_dp_in', 'name' => 'Taupunkt innen', 'text' => $this->fmtNum($h['dewPointIn'], 1) . ' °C'];
+            }
+            if ($h['hasCalc'] && $h['hint'] !== null) {
+                $klima[] = ['kind' => 'status', 'id' => 'hum_hint', 'name' => 'Lüften', 'text' => $h['hint'] ? 'Empfohlen' : 'Nicht nötig',
+                    'icon' => $h['hint'] ? '🌬️' : '✅', 'state' => $h['hint'] ? 'warn' : '', 'sub' => $h['result'], 'cls' => $h['result'] !== '' ? 'tk-span2' : ''];
+            }
+        }
+        $add('Klima', $klima);
+
+        // Status: Praesenz + Status-Variablen
+        $status = [];
+        if ($d['presence'] !== null) {
+            $status[] = ['kind' => 'status', 'id' => 'presence', 'name' => 'Präsenz', 'text' => $d['presence'] ? 'Anwesend' : 'Abwesend',
+                'icon' => $d['presence'] ? '🏠' : '🚶', 'state' => $d['presence'] ? 'ok' : ''];
+        }
+        foreach ($d['statusVars'] as $row) {
+            $status[] = $this->selectTile($row);
+        }
+        $add('Status', $status);
+
+        $auto = [];
+        foreach ($d['automations'] as $a) {
+            $auto[] = $a['isBool']
+                ? ['kind' => 'toggle', 'id' => $a['ident'], 'name' => $a['name'], 'on' => (bool) $a['on'], 'text' => $a['on'] ? 'An' : 'Aus', 'icon' => '⏻']
+                : $this->selectTile($a);
+        }
+        $add('Automatisierung', $auto);
+
+        if ($d['sonos'] !== null) {
+            $add('Musik', [['kind' => 'sonos', 'id' => 'sonos'] + $d['sonos']]);
+        }
+
+        // Licht: "Alle Lichter" als normaler Button (Wunsch 09.10.), danach jede Lampe als Button-Kachel
+        $lights = [];
+        if (count($d['lights']) > 1) {
+            // "mindestens eine an" statt "alle an" – sonst muesste man zum Ausschalten erst alles einschalten
+            $anyOn = array_reduce($d['lights'], static fn (bool $c, array $l): bool => $c || ($l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) $l['on']), false);
+            $lights[] = ['kind' => 'toggle', 'id' => 'lights_all', 'name' => 'Alle Lichter', 'on' => $anyOn, 'text' => $anyOn ? 'An' : 'Aus', 'icon' => '💡'];
+        }
+        foreach ($d['lights'] as $l) {
+            $on = $l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) $l['on'];
+            if ($l['kind'] === 'switch') {
+                $lights[] = ['kind' => 'toggle', 'id' => $l['ident'] . '_on', 'name' => $l['name'], 'on' => $on, 'text' => $on ? 'An' : 'Aus', 'icon' => '💡'];
+            } else {
+                $lights[] = ['kind' => 'light', 'id' => $l['ident'], 'name' => $l['name'], 'type' => $l['kind'], 'on' => $on,
+                    'brightness' => (int) round($l['brightness'] ?? 0),
+                    'color' => $l['color'] !== null ? '#' . str_pad(dechex(max(0, (int) $l['color'])), 6, '0', STR_PAD_LEFT) : null];
+            }
+        }
+        $add('Licht', $lights);
+
+        $shutters = [];
+        foreach ($d['shutters'] as $s) {
+            $shutters[] = ['kind' => 'shutter', 'id' => $s['ident'], 'name' => $s['name'], 'type' => $s['kind'],
+                'value' => $s['kind'] === 'position' ? (int) round($s['value']) : null];
+        }
+        $add('Rollläden', $shutters);
+
+        $sensors = [];
+        foreach ($d['sensors'] as $i => $s) {
+            if ($s['type'] === 'humidity' && $h !== null) {
+                continue; // steht schon unter Klima
+            }
+            $id = 'sensor_' . $i;
+            if ($s['bool'] !== null) {
+                [$offIcon, $onIcon, $offText, $onText, $onState] = self::SENSOR_VIEW[$s['type']] ?? ['⚪', '🟢', 'Aus', 'An', ''];
+                $sensors[] = ['kind' => 'status', 'id' => $id, 'name' => $s['name'], 'text' => $s['bool'] ? $onText : $offText,
+                    'icon' => $s['bool'] ? $onIcon : $offIcon, 'state' => $s['bool'] ? $onState : ''];
+            } else {
+                $sensors[] = ['kind' => 'value', 'id' => $id, 'name' => $s['name'], 'text' => $this->fmtNum($s['value'], 1) . ($s['type'] === 'humidity' ? ' %' : '')];
+            }
+        }
+        $add('Sensoren', $sensors);
+
+        $smoke = [];
+        $multi = count($d['smokeDetectors']) > 1;
+        foreach ($d['smokeDetectors'] as $sd) {
+            $prefix = $multi ? $sd['name'] . ': ' : '';
+            if ($sd['kind'] !== 'nest') {
+                $smoke[] = $this->alarmTile($sd['ident'], $prefix . 'Rauchmelder', $sd['alarm'], '🔥');
+                continue;
+            }
+            $sub = [];
+            if ($sd['lastTest'] !== null) {
+                $sub[] = 'Test ' . date('d.m.Y', $sd['lastTest']);
+            }
+            if ($sd['replaceBy'] !== null) {
+                $sub[] = 'Austausch ' . date('m/Y', $sd['replaceBy']);
+            }
+            $tile = $this->alarmTile($sd['ident'] . '_smoke', $prefix . 'Rauch', $sd['smoke'], '🔥');
+            if ($sd['hushed'] === true && !$sd['smoke']) {
+                $tile['text']  = 'Stummgeschaltet';
+                $tile['state'] = 'warn';
+            }
+            $tile['sub'] = implode(' · ', $sub);
+            $smoke[]     = $tile;
+            if ($sd['co'] !== null) {
+                $smoke[] = $this->alarmTile($sd['ident'] . '_co', $prefix . 'CO', $sd['co'], '☠️');
+            }
+            if ($sd['heat'] !== null) {
+                $smoke[] = $this->alarmTile($sd['ident'] . '_heat', $prefix . 'Hitze', $sd['heat'], '🌡️');
+            }
+            if ($sd['battery'] !== null || $sd['wired'] !== null) {
+                $smoke[] = ['kind' => 'value', 'id' => $sd['ident'] . '_batt', 'name' => $prefix . 'Batterie',
+                    'text' => $sd['battery'] !== null ? $sd['battery'] . ' %' : '–', 'sub' => $sd['wired'] === null ? '' : ($sd['wired'] ? 'Netzstrom' : 'Batteriebetrieb')];
+            }
+        }
+        $add('Rauchmelder', $smoke);
+
+        $vac = [];
+        foreach ($d['vacuums'] as $vc) {
+            $b     = (int) $vc['battery'];
+            $vac[] = ['kind' => 'vacuum', 'id' => $vc['ident'], 'name' => $vc['name'], 'state' => $vc['state'],
+                'batt' => $b . ' %' . ($vc['charging'] ? ' ⚡' : ''), 'battState' => $b <= 20 ? 'alarm' : ($b <= 50 ? 'warn' : ''),
+                'fan' => (string) $vc['fanSpeed'], 'last' => $vc['lastClean']];
+        }
+        $add('Saugroboter', $vac);
+
+        return ['title' => $d['roomName'], 'updated' => $d['updated'], 'groups' => $groups];
     }
 
-    /** Thumb (x,y) on the 120x120/r45/center60,60 dial arc for a value in [min,max]. Mirrors HeatingDashboard's dial. */
+    private function alarmTile(string $id, string $name, bool $alarm, string $icon): array
+    {
+        return ['kind' => 'status', 'id' => $id, 'name' => $name, 'text' => $alarm ? 'ALARM' : 'OK', 'icon' => $alarm ? $icon : '✅', 'state' => $alarm ? 'alarm' : 'ok'];
+    }
+
+    /** Variable mit Profil-Assoziationen → Auswahl-Kachel (Buttonreihe), sonst reine Anzeige. */
+    private function selectTile(array $row): array
+    {
+        if (count($row['options']) === 0) {
+            return ['kind' => 'value', 'id' => $row['ident'], 'name' => $row['name'], 'text' => $row['value'] !== '' ? $row['value'] : '–', 'cls' => 'small-value'];
+        }
+        $opts = array_map(static fn ($o) => [(string) $o['Value'], (string) $o['Name']], $row['options']);
+        return ['kind' => 'seg', 'id' => $row['ident'], 'name' => $row['name'], 'value' => (string) $row['value'], 'options' => $opts,
+            'cls' => count($opts) > 3 ? 'tk-span2' : ''];
+    }
+
+    /** Flache Liste der Live-Updates: [op, id, wert]. Siehe tk.on('__all__') im JS. */
+    private function ops(array $v): array
+    {
+        $ops = [];
+        foreach ($v['groups'] as $g) {
+            foreach ($g['tiles'] as $t) {
+                $id = $t['id'];
+                switch ($t['kind']) {
+                    case 'value':
+                        $ops[] = ['t', $id . '_val', $t['text']];
+                        if (isset($t['sub'])) {
+                            $ops[] = ['t', $id . '_sub', $t['sub']];
+                        }
+                        break;
+                    case 'status':
+                        array_push($ops, ['t', $id . '_val', $t['text']], ['t', $id . '_icon', $t['icon']], ['s', $id, $t['state']]);
+                        if (isset($t['sub'])) {
+                            $ops[] = ['t', $id . '_sub', $t['sub']];
+                        }
+                        break;
+                    case 'toggle':
+                        array_push($ops, ['o', $id . '_card', $t['on']], ['t', $id . '_val', $t['text']]);
+                        break;
+                    case 'seg':
+                        $ops[] = ['g', $id, $t['value']];
+                        break;
+                    case 'thermo':
+                        $ops[] = ['d', $id . '_soll', $t['soll']];
+                        if ($t['ist'] !== null) {
+                            $ops[] = ['t', $id . '_ist', $t['ist']];
+                        }
+                        if ($t['valve'] !== null) {
+                            array_push($ops, ['w', $id . '_valve_fill', $t['valve']], ['t', $id . '_valve_pct', $t['valve'] . ' %']);
+                        }
+                        if ($t['mode'] !== null) {
+                            $ops[] = ['g', $id . '_mode', (string) $t['mode']];
+                        }
+                        break;
+                    case 'light':
+                        array_push($ops, ['o', $id . '_card', $t['on']], ['v', $id . '_brightness_range', $t['brightness']], ['t', $id . '_brightness_val', $t['brightness'] . ' %']);
+                        if ($t['color'] !== null) {
+                            $ops[] = ['v', $id . '_color_input', $t['color']];
+                        }
+                        break;
+                    case 'shutter':
+                        if ($t['value'] !== null) {
+                            array_push($ops, ['v', $id . '_range', $t['value']], ['t', $id . '_val', $t['value'] . ' % zu']);
+                        }
+                        break;
+                    case 'vacuum':
+                        array_push($ops, ['t', $id . '_state', $t['state']], ['t', $id . '_batt', $t['batt']], ['s', $id . '_batt', $t['battState']], ['g', $id . '_fanspeed', $t['fan']], ['t', $id . '_last', $t['last']]);
+                        break;
+                    case 'sonos':
+                        $vol = (int) (($t['isGrouped'] ? $t['groupVolume'] : $t['volume']) ?? 0);
+                        array_push($ops, ['t', 'sonos_title', $t['title'] !== '' ? $t['title'] : '–'], ['t', 'sonos_artist', $t['artist']],
+                            ['t', 'sonos_play', $t['status'] === 2 ? '⏸' : '▶'], ['o', 'sonos_play', $t['status'] === 2], ['o', 'sonos_mute', (bool) $t['mute']],
+                            ['v', 'sonos_volume_range', $vol], ['t', 'sonos_volume_val', $vol . ' %'], ['src', 'sonos_cover', $t['cover']]);
+                        if ($t['playlist'] !== null) {
+                            $ops[] = ['v', 'sonos_playlist_select', $t['playlist']];
+                        }
+                        if ($t['group'] !== null) {
+                            $ops[] = ['v', 'sonos_group_select', $t['group']];
+                        }
+                        break;
+                }
+            }
+        }
+        return ['updated' => $v['updated'], 'ops' => $ops];
+    }
+
+    private function renderTile(array $t): string
+    {
+        $id  = $t['id'];
+        $cls = $t['cls'] ?? '';
+        switch ($t['kind']) {
+            case 'value':
+                $sub = isset($t['sub']) ? "<span id=\"{$id}_sub\" class=\"tk-sub\">" . self::tkEsc($t['sub']) . '</span>' : '';
+                return "<div class=\"tk-tile {$cls}\" id=\"{$id}_card\"><span class=\"tk-name\">" . self::tkEsc($t['name']) . '</span>'
+                    . "<span id=\"{$id}_val\" class=\"tk-value\">" . self::tkEsc($t['text']) . "</span>{$sub}</div>";
+            case 'status':
+                return self::tkStatusTile($id, $t['name'], $t['text'], $t['icon'], $t['state'], null, $t['sub'] ?? '', $cls);
+            case 'toggle':
+                return self::tkToggleTile($id, $t['name'], $t['on'], $t['text'], $t['icon']);
+            case 'seg':
+                return "<div class=\"tk-tile {$cls}\" id=\"{$id}_card\"><span class=\"tk-name\">" . self::tkEsc($t['name']) . '</span>'
+                    . $this->segButtons($id, $t['options'], $t['value']) . '</div>';
+            case 'thermo':
+                return $this->renderThermo($t);
+            case 'light':
+                return $this->renderLight($t);
+            case 'shutter':
+                return $this->renderShutter($t);
+            case 'vacuum':
+                return $this->renderVacuum($t);
+            case 'sonos':
+                return $this->renderSonos($t);
+        }
+        return '';
+    }
+
+    /** Buttonreihe; Klick ruft RequestAction($ident, Wert) und markiert sofort. */
+    private function segButtons(string $ident, array $options, ?string $current): string
+    {
+        $html = "<div class=\"tk-seg\" id=\"{$ident}_seg\">";
+        foreach ($options as [$value, $label]) {
+            $on   = $current !== null && $value === $current ? ' class="tk-on"' : '';
+            $vEsc = self::tkEsc($value);
+            $html .= "<button type=\"button\"{$on} data-value=\"{$vEsc}\" onclick=\"pick('{$ident}', this)\">" . self::tkEsc($label) . '</button>';
+        }
+        return $html . '</div>';
+    }
+
+    private function renderThermo(array $t): string
+    {
+        $id    = $t['id'];
+        $name  = $t['name'] !== '' ? '<span class="tk-name">' . self::tkEsc($t['name']) . '</span>' : '';
+        $stats = '';
+        if ($t['ist'] !== null) {
+            $stats .= "<div><span class=\"tk-name\">Ist</span><span id=\"{$id}_ist\" class=\"tk-value\">" . self::tkEsc($t['ist']) . '</span></div>';
+        }
+        if ($t['valve'] !== null) {
+            $stats .= "<div><span class=\"tk-name\">Ventil <span id=\"{$id}_valve_pct\">{$t['valve']} %</span></span>"
+                . "<div class=\"valve-bar\"><div id=\"{$id}_valve_fill\" class=\"valve-fill\" style=\"width:{$t['valve']}%\"></div></div></div>";
+        }
+        $modes = count($t['options']) > 0
+            ? $this->segButtons($id . '_mode', array_map(static fn ($o) => [(string) $o['Value'], (string) $o['Name']], $t['options']), $t['mode'] !== null ? (string) $t['mode'] : null)
+            : '';
+        return "<div class=\"tk-tile tk-span2 thermo\" id=\"{$id}_card\">{$name}<div class=\"thermo-body\">"
+            . $this->renderThermoDial($id . '_soll', $t['soll']) . "<div class=\"thermo-stats\">{$stats}</div></div>{$modes}</div>";
+    }
+
+    /** Licht mit Dimmer/Farbe: die ganze Kachel ist der Ein/Aus-Button, Regler und Farbwahl liegen darin. */
+    private function renderLight(array $t): string
+    {
+        $id    = $t['id'];
+        $on    = $t['on'] ? ' tk-on' : '';
+        $click = $t['type'] === 'dimmer' ? "dimToggle('{$id}')" : "lightToggle('{$id}')";
+        $color = $t['color'] !== null
+            ? "<input id=\"{$id}_color_input\" type=\"color\" class=\"tk-color\" value=\"{$t['color']}\" onchange=\"requestAction('{$id}_color', parseInt(this.value.substring(1),16))\">"
+            : '';
+        // Kopfzeile: Name links, Farbwahl + Lampensymbol rechts; darunter der Dimmer ueber die volle Breite
+        return "<div class=\"tk-tile tk-click light{$on}\" id=\"{$id}_card\" role=\"button\" onclick=\"{$click}\">"
+            . '<span class="tk-row"><span class="tk-name">' . self::tkEsc($t['name']) . '</span>'
+            . "<span class=\"light-head\" onclick=\"event.stopPropagation()\">{$color}</span><span class=\"tk-icon\">💡</span></span>"
+            . "<div class=\"light-ctrl\" onclick=\"event.stopPropagation()\">"
+            . "<input id=\"{$id}_brightness_range\" type=\"range\" class=\"tk-range\" min=\"0\" max=\"100\" value=\"{$t['brightness']}\""
+            . " oninput=\"tk.setText('{$id}_brightness_val', this.value + ' %')\" onchange=\"requestAction('{$id}_brightness', parseInt(this.value))\">"
+            . "<span id=\"{$id}_brightness_val\" class=\"tk-sub light-pct\">{$t['brightness']} %</span></div></div>";
+    }
+
+    private function renderShutter(array $t): string
+    {
+        $id   = $t['id'];
+        $name = '<span class="tk-name">' . self::tkEsc($t['name']) . '</span>';
+        if ($t['type'] === 'updown') {
+            // RTS/unidirektional: keine Rueckmeldung, nur Auf/Stopp/Zu
+            return "<div class=\"tk-tile shutter\" id=\"{$id}_card\">{$name}<div class=\"tk-seg\">"
+                . "<button onclick=\"requestAction('{$id}_state','open')\">▲</button><button onclick=\"requestAction('{$id}_state','stop')\">■</button>"
+                . "<button onclick=\"requestAction('{$id}_state','closed')\">▼</button></div></div>";
+        }
+        return "<div class=\"tk-tile shutter\" id=\"{$id}_card\"><span class=\"tk-row\">{$name}<span id=\"{$id}_val\" class=\"tk-sub\">{$t['value']} % zu</span></span>"
+            . "<input id=\"{$id}_range\" type=\"range\" class=\"tk-range\" min=\"0\" max=\"100\" value=\"{$t['value']}\""
+            . " oninput=\"tk.setText('{$id}_val', this.value + ' % zu')\" onchange=\"requestAction('{$id}_position', parseInt(this.value))\">"
+            . "<div class=\"tk-seg\"><button onclick=\"requestAction('{$id}_position',0)\">▲ Auf</button><button onclick=\"requestAction('{$id}_position',100)\">▼ Zu</button></div></div>";
+    }
+
+    private function renderVacuum(array $t): string
+    {
+        $id   = $t['id'];
+        $bcls = $t['battState'] !== '' ? ' tk-' . $t['battState'] : '';
+        $fan  = $this->segButtons($id . '_fanspeed', array_map(static fn ($k, $l) => [(string) $k, $l], array_keys(self::FAN_SPEEDS), self::FAN_SPEEDS), $t['fan']);
+        return "<div class=\"tk-tile tk-span2 vac\" id=\"{$id}_card\"><span class=\"tk-row\"><span class=\"tk-name\">🤖 " . self::tkEsc($t['name']) . '</span>'
+            . "<span id=\"{$id}_batt\" class=\"tk-status{$bcls}\">" . self::tkEsc($t['batt']) . '</span></span>'
+            . "<span id=\"{$id}_state\" class=\"tk-status\">" . self::tkEsc($t['state']) . '</span>'
+            . "<div class=\"tk-seg\"><button onclick=\"tk.action('{$id}_clean')\">▶</button><button onclick=\"tk.action('{$id}_pause')\">⏸</button>"
+            . "<button onclick=\"tk.action('{$id}_stop')\">⏹</button><button onclick=\"tk.action('{$id}_dock')\">🏠</button></div>{$fan}"
+            . "<span id=\"{$id}_last\" class=\"tk-sub\">" . self::tkEsc($t['last']) . '</span></div>';
+    }
+
+    private function renderSonos(array $t): string
+    {
+        $vol     = (int) (($t['isGrouped'] ? $t['groupVolume'] : $t['volume']) ?? 0);
+        $volId   = $t['isGrouped'] ? 'sonos_groupvolume' : 'sonos_volume';
+        $playing = $t['status'] === 2; // SonosAccess::PLAY
+        $cover   = '<img id="sonos_cover" class="sonos-cover" src="' . self::tkEsc($t['cover']) . '" alt="" onerror="this.style.visibility=\'hidden\'">';
+        $select  = static function (string $id, array $opts, ?string $cur): string {
+            if (count($opts) === 0) {
+                return '';
+            }
+            $o = '';
+            foreach ($opts as $opt) {
+                $v  = (string) $opt['Value'];
+                $o .= '<option value="' . self::tkEsc($v) . '"' . ($cur === $v ? ' selected' : '') . '>' . self::tkEsc($opt['Name']) . '</option>';
+            }
+            return "<select id=\"{$id}_select\" class=\"tk-select\" onchange=\"requestAction('{$id}', this.value)\">{$o}</select>";
+        };
+        return '<div class="tk-tile tk-span2 sonos" id="sonos_card">'
+            . "<div class=\"sonos-now\">{$cover}<div class=\"sonos-info\"><span id=\"sonos_title\" class=\"tk-text sonos-title\">" . self::tkEsc($t['title'] !== '' ? $t['title'] : '–') . '</span>'
+            . '<span id="sonos_artist" class="tk-sub">' . self::tkEsc($t['artist']) . '</span></div></div>'
+            . '<div class="tk-seg"><button onclick="requestAction(\'sonos_status\',0)">⏮</button>'
+            . '<button id="sonos_play"' . ($playing ? ' class="tk-on"' : '') . ' onclick="sonosPlay()">' . ($playing ? '⏸' : '▶') . '</button>'
+            . '<button onclick="requestAction(\'sonos_status\',1)">⏹</button><button onclick="requestAction(\'sonos_status\',4)">⏭</button>'
+            . '<button id="sonos_mute"' . ($t['mute'] ? ' class="tk-on"' : '') . ' onclick="sonosMute()">🔇</button></div>'
+            . "<div class=\"light-ctrl\"><span class=\"tk-sub\">🔊</span><input id=\"sonos_volume_range\" type=\"range\" class=\"tk-range\" min=\"0\" max=\"100\" value=\"{$vol}\""
+            . " oninput=\"tk.setText('sonos_volume_val', this.value + ' %')\" onchange=\"requestAction('{$volId}', parseInt(this.value))\"><span id=\"sonos_volume_val\" class=\"tk-sub light-pct\">{$vol} %</span></div>"
+            . $select('sonos_playlist', $t['playlistOptions'], $t['playlist']) . $select('sonos_group', $t['groupOptions'], $t['group']) . '</div>';
+    }
+
+    // ─── Thermostat-Drehregler (wie HeatingDashboard) ───────────────────────
+
+    /** Thumb (x,y) on the 120x120/r45/center60,60 dial arc for a value in [min,max]. */
     private function dialThumbPos(float $value, float $min, float $max): array
     {
-        $frac     = $max > $min ? max(0, min(1, ($value - $min) / ($max - $min))) : 0;
-        $angleDeg = -135 + $frac * 270;
-        $rad      = deg2rad($angleDeg);
+        $frac = $max > $min ? max(0, min(1, ($value - $min) / ($max - $min))) : 0;
+        $rad  = deg2rad(-135 + $frac * 270);
         return [round(60 + 45 * sin($rad), 1), round(60 - 45 * cos($rad), 1)];
     }
 
-    /** SVG arc path from the dial's start (frac=0) to the given fraction, for the colored progress stroke. */
     private function dialArcPath(float $frac): string
     {
-        $frac      = max(0, min(1, $frac));
-        $sweepDeg  = $frac * 270;
-        $endRad    = deg2rad(-135 + $sweepDeg);
-        $ex        = round(60 + 45 * sin($endRad), 1);
-        $ey        = round(60 - 45 * cos($endRad), 1);
-        $largeArc  = $sweepDeg > 180 ? 1 : 0;
+        $frac     = max(0, min(1, $frac));
+        $sweepDeg = $frac * 270;
+        $endRad   = deg2rad(-135 + $sweepDeg);
+        $ex       = round(60 + 45 * sin($endRad), 1);
+        $ey       = round(60 - 45 * cos($endRad), 1);
+        $largeArc = $sweepDeg > 180 ? 1 : 0;
         return "M 28.2 91.8 A 45 45 0 {$largeArc} 1 {$ex} {$ey}";
     }
 
-    /** Blue (cold/low) to red (hot/high) for the dial fraction, so it visibly shifts warmer as the target rises. */
+    /** Blau (kalt) bis Rot (warm), damit der Regler sichtbar waermer wird. */
     private function dialColor(float $frac): string
     {
         $frac = max(0, min(1, $frac));
@@ -1592,663 +1706,127 @@ HTML;
     private function renderThermoDial(string $ident, ?float $value): string
     {
         [$min, $max, $step] = self::THERMOSTAT_RANGE;
-        $val     = $value ?? $min;
-        $frac    = $max > $min ? max(0, min(1, ($val - $min) / ($max - $min))) : 0;
+        $val       = $value ?? $min;
+        $frac      = $max > $min ? max(0, min(1, ($val - $min) / ($max - $min))) : 0;
         [$tx, $ty] = $this->dialThumbPos($val, $min, $max);
-        $arcPath = $this->dialArcPath($frac);
-        $color   = $this->dialColor($frac);
-        $valStr  = $value !== null ? $this->fmtNum($value, 1) . '°' : '–';
-
+        $color     = $this->dialColor($frac);
+        $valStr    = $value !== null ? $this->fmtNum($value, 1) . '°' : '–';
         return "<div class=\"dial\" data-ident=\"{$ident}\" data-min=\"{$min}\" data-max=\"{$max}\" data-step=\"{$step}\" data-value=\"{$val}\">"
             . '<svg class="dial-svg" viewBox="0 0 120 120">'
-            . '<path class="dial-track" d="M 28.2 91.8 A 45 45 0 1 1 91.8 91.8" fill="none" stroke="#1e2d40" stroke-width="8" stroke-linecap="round"/>'
-            . "<path class=\"dial-arc\" d=\"{$arcPath}\" fill=\"none\" stroke=\"{$color}\" stroke-width=\"8\" stroke-linecap=\"round\"/>"
-            . "<circle class=\"dial-thumb\" cx=\"{$tx}\" cy=\"{$ty}\" r=\"7\" fill=\"{$color}\"/>"
-            . '</svg>'
-            . "<div class=\"dial-center\"><span class=\"dial-value\" style=\"color:{$color}\">{$valStr}</span><span class=\"dial-caption\">Soll</span></div>"
-            . '</div>';
-    }
-
-    /** Radiator valve open-percentage as a small horizontal gauge -- reads from the separate valve actuator device when the configured thermostat itself doesn't have VALVE_STATE (see firstVarIdByIdentAcrossSiblings). */
-    private function renderValveGauge(string $ident, ?float $valvePct): string
-    {
-        if ($valvePct === null) {
-            return '';
-        }
-        $pct    = max(0.0, min(100.0, $valvePct));
-        $pctStr = $this->fmtNum($pct, 0);
-        return "<div class=\"valve-gauge\"><span class=\"cur-label\">Ventil</span>"
-            . "<div class=\"valve-bar\"><div id=\"{$ident}_valve_fill\" class=\"valve-fill\" style=\"width:{$pctStr}%\"></div></div>"
-            . "<span id=\"{$ident}_valve_pct\" class=\"valve-pct\">{$pctStr}%</span></div>";
-    }
-
-    private function renderModeButtons(string $ident, array $options, ?string $current): string
-    {
-        $html = "<div class=\"mode-row\" data-ident=\"{$ident}\">";
-        foreach ($options as $opt) {
-            $value     = (string) $opt['Value'];
-            $activeCls = $current === $value ? ' mode-active' : '';
-            $valueEsc  = htmlspecialchars($value, ENT_QUOTES);
-            $labelEsc  = htmlspecialchars($opt['Name'], ENT_QUOTES);
-            $html .= "<button type=\"button\" class=\"mode-btn{$activeCls}\" data-value=\"{$valueEsc}\" "
-                . "onclick=\"requestAction('{$ident}', '{$valueEsc}')\">{$labelEsc}</button>";
-        }
-        return $html . '</div>';
-    }
-
-    private function renderThermostatTile(array $t): string
-    {
-        // Deliberately no device/node name header here: the underlying
-        // Homematic channel name is an implementation detail, not
-        // something the room-level "Temperatur" section should surface.
-        $ident = $t['ident'];
-        $dial  = $this->renderThermoDial($ident . '_soll', $t['soll']);
-
-        $statsHtml = '';
-        if ($t['ist'] !== null) {
-            $statsHtml .= $this->renderStatTile($ident . '_ist', 'Ist', $this->fmtNum($t['ist'], 1) . ' °C');
-        }
-        $statsHtml .= $this->renderValveGauge($ident, $t['valve'] ?? null);
-
-        $modeHtml = count($t['modeOptions']) > 0
-            ? $this->renderModeButtons($ident . '_mode', $t['modeOptions'], $t['mode'])
-            : '';
-
-        return <<<THERMO
-<div class="thermo-tile">
-  <div class="thermo-body">
-    {$dial}
-    <div class="thermo-stats">{$statsHtml}</div>
-  </div>
-  {$modeHtml}
-</div>
-THERMO;
-    }
-
-    private function renderHumidityPanel(?array $humidity): string
-    {
-        if ($humidity === null) {
-            return '';
-        }
-
-        // Sensor value and dew points are peers, shown side by side in the
-        // same grid, whether or not a calculator instance is configured.
-        $gridTiles = '';
-        if ($humidity['sensor'] !== null) {
-            $gridTiles .= $this->renderStatTile('humidity_sensor', 'Luftfeuchtigkeit', $this->fmtNum($humidity['sensor'], 1) . ' %');
-        }
-        if ($humidity['hasCalc'] && ($humidity['dewPointOut'] !== null || $humidity['dewPointIn'] !== null)) {
-            $gridTiles .= $this->renderStatTile('humidity_dp_out', 'Taupunkt außen', $this->fmtNum($humidity['dewPointOut'], 1) . ' °C');
-            $gridTiles .= $this->renderStatTile('humidity_dp_in', 'Taupunkt innen', $this->fmtNum($humidity['dewPointIn'], 1) . ' °C');
-        }
-        if ($humidity['hasCalc'] && $humidity['hint'] !== null) {
-            $hintColor = $humidity['hint'] ? '#f0c060' : '#4a6a8a';
-            $hintIcon  = $humidity['hint'] ? '💨' : '🚪';
-            $hintText  = $humidity['hint'] ? 'Empfohlen' : 'Nicht nötig';
-            $gridTiles .= "<div id=\"humidity_hint\" class=\"cur-tile\"><span class=\"cur-label\">Lüften</span><span id=\"humidity_hint_val\" class=\"cur-value\" style=\"color:{$hintColor}\">{$hintIcon} {$hintText}</span></div>";
-        }
-        $gridHtml = $gridTiles !== '' ? "<div class=\"current-grid\">{$gridTiles}</div>" : '';
-
-        $calcTextHtml = '';
-        if ($humidity['hasCalc']) {
-            $resultEsc = htmlspecialchars($humidity['result'] !== '' ? $humidity['result'] : '–', ENT_QUOTES);
-            $calcTextHtml = "<span id=\"humidity_result\" class=\"humidity-result\">{$resultEsc}</span>";
-        }
-
-        return <<<HUMID
-<div class="pv-block">
-  <div class="pv-title">💧 Luftfeuchtigkeit</div>
-  {$calcTextHtml}
-  {$gridHtml}
-</div>
-HUMID;
-    }
-
-    private function renderSonosPanel(?array $sonos): string
-    {
-        if ($sonos === null) {
-            return '';
-        }
-        $status  = $sonos['status'];
-        $playing = $status === 2; // SonosAccess::PLAY
-        $volume  = $sonos['isGrouped'] ? $sonos['groupVolume'] : $sonos['volume'];
-        $volumeIdent = $sonos['isGrouped'] ? 'sonos_groupvolume' : 'sonos_volume';
-        $volumeVal   = $volume ?? 0;
-
-        $coverHtml = $sonos['cover'] !== ''
-            ? '<img id="sonos_cover" class="sonos-cover" src="' . htmlspecialchars($sonos['cover'], ENT_QUOTES) . '" onerror="this.style.visibility=\'hidden\'">'
-            : '<div id="sonos_cover" class="sonos-cover sonos-cover-empty">🎵</div>';
-
-        $title  = htmlspecialchars($sonos['title'] !== '' ? $sonos['title'] : '–', ENT_QUOTES);
-        $artist = htmlspecialchars($sonos['artist'], ENT_QUOTES);
-
-        $muteChecked = $sonos['mute'] ? ' checked' : '';
-
-        $playlistSelect = count($sonos['playlistOptions']) > 0
-            ? $this->renderSelect('sonos_playlist', $sonos['playlistOptions'], $sonos['playlist'], 'mode-select')
-            : '';
-        $groupSelect = count($sonos['groupOptions']) > 0
-            ? $this->renderSelect('sonos_group', $sonos['groupOptions'], $sonos['group'], 'mode-select')
-            : '';
-
-        return <<<SONOS
-<div class="pv-block">
-  <div class="pv-title">🎵 Sonos</div>
-  <div class="sonos-now-playing">
-    {$coverHtml}
-    <div class="sonos-track-info">
-      <span id="sonos_title" class="sonos-title">{$title}</span>
-      <span id="sonos_artist" class="sonos-artist">{$artist}</span>
-    </div>
-  </div>
-  <div class="sonos-controls">
-    <button type="button" class="sonos-btn" onclick="requestAction('sonos_status', 0)">⏮</button>
-    <button type="button" id="sonos_playpause" class="sonos-btn sonos-btn-main" data-playing="{$this->boolAttr($playing)}" onclick="sonosTogglePlay()">{$this->playPauseIcon($playing)}</button>
-    <button type="button" class="sonos-btn" onclick="requestAction('sonos_status', 1)">⏹</button>
-    <button type="button" class="sonos-btn" onclick="requestAction('sonos_status', 4)">⏭</button>
-    <label class="toggle sonos-mute"><input id="sonos_mute_input" type="checkbox"{$muteChecked} onchange="requestAction('sonos_mute', this.checked)">
-      <span class="toggle-track"><span class="toggle-thumb"></span></span></label>
-  </div>
-  <div class="sonos-volume-row">
-    <span id="sonos_volume_label" class="light-name">🔊 {$this->fmtNum($volumeVal)}%</span>
-    <input id="sonos_volume_range" type="range" min="0" max="100" value="{$volumeVal}" class="light-slider"
-      oninput="setText('sonos_volume_label', '🔊 ' + this.value + '%')" onchange="requestAction('{$volumeIdent}', parseInt(this.value))">
-  </div>
-  {$playlistSelect}
-  {$groupSelect}
-</div>
-SONOS;
-    }
-
-    private function boolAttr(bool $v): string
-    {
-        return $v ? '1' : '0';
-    }
-
-    private function playPauseIcon(bool $playing): string
-    {
-        return $playing ? '⏸' : '▶';
+            . '<path d="M 28.2 91.8 A 45 45 0 1 1 91.8 91.8" fill="none" stroke="#1e2d40" stroke-width="8" stroke-linecap="round"/>'
+            . '<path class="dial-arc" d="' . $this->dialArcPath($frac) . "\" fill=\"none\" stroke=\"{$color}\" stroke-width=\"8\" stroke-linecap=\"round\"/>"
+            . "<circle class=\"dial-thumb\" cx=\"{$tx}\" cy=\"{$ty}\" r=\"7\" fill=\"{$color}\"/></svg>"
+            . "<div class=\"dial-center\"><span class=\"dial-value\" style=\"color:{$color}\">{$valStr}</span><span class=\"tk-sub\">Soll</span></div></div>";
     }
 
     private function buildDashboardHTML(): string
     {
-        $d = $this->collectData();
-
-        $statusVarsHtml = '';
-        if ($d['presence'] !== null) {
-            $presColor = $d['presence'] ? '#7ee89a' : '#4a6a8a';
-            $presIcon  = $d['presence'] ? '🧍' : '🚶';
-            $presText  = $d['presence'] ? 'Anwesend' : 'Abwesend';
-            $statusVarsHtml .= "<div id=\"presence_badge\" class=\"cur-tile\"><span class=\"cur-label\">Präsenz</span><span id=\"presence_badge_val\" class=\"cur-value\" style=\"color:{$presColor}\">{$presIcon} {$presText}</span></div>";
+        $v    = $this->view($this->collectData());
+        $body = '';
+        foreach ($v['groups'] as $g) {
+            $body .= self::tkGroup($g['name']);
+            foreach ($g['tiles'] as $t) {
+                $body .= $this->renderTile($t);
+            }
         }
-        foreach ($d['statusVars'] as $row) {
-            $statusVarsHtml .= $this->renderStatusVarTile($row);
+        if ($body === '') {
+            $body = '<div class="tk-empty tk-full">Noch nichts konfiguriert.</div>';
         }
-        $statusVarsBlock = $statusVarsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🔧 Status</div><div class="tile-grid">' . $statusVarsHtml . '</div></div>'
-            : '';
 
-        $automationsHtml = '';
-        foreach ($d['automations'] as $a) {
-            $automationsHtml .= $this->renderAutomationTile($a);
-        }
-        $automationsBlock = $automationsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">⚙️ Automatisierung</div><div class="tile-grid">' . $automationsHtml . '</div></div>'
-            : '';
-
-        $thermoHtml = '';
-        foreach ($d['thermostats'] as $t) {
-            $thermoHtml .= $this->renderThermostatTile($t);
-        }
-        $thermoBlock = $thermoHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🌡️ Temperatur</div><div class="thermo-stack">' . $thermoHtml . '</div></div>'
-            : '';
-
-        $humidityBlock = $this->renderHumidityPanel($d['humidity']);
-
-        $sonosBlock = $this->renderSonosPanel($d['sonos']);
-
-        $lightsHtml = '';
-        foreach ($d['lights'] as $light) {
-            $lightsHtml .= $this->renderLightTile($light);
-        }
-        // Reflects "at least one light is on" rather than "all are on" --
-        // otherwise the switch shows off as soon as a single light differs,
-        // forcing an on-then-off round trip just to turn everything off.
-        $allLightsOn = array_reduce($d['lights'], static function (bool $carry, array $l): bool {
-            $isOn = $l['kind'] === 'dimmer' ? ($l['brightness'] ?? 0) > 0 : (bool) ($l['on'] ?? false);
-            return $carry || $isOn;
-        }, false);
-        $allLightsOnClass = $allLightsOn ? ' on' : '';
-        $allLightsChecked = $allLightsOn ? ' checked' : '';
-        $allLightsTile = count($d['lights']) > 1
-            ? "<div id=\"lights_all\" class=\"light-tile clickable{$allLightsOnClass}\" onclick=\"toggleFlatSwitch('lights_all')\">"
-                . "<span class=\"light-name\">Alle Lichter</span><span class=\"tile-icon\">⏻</span>"
-                . "<input id=\"lights_all_input\" type=\"checkbox\"{$allLightsChecked} style=\"display:none\"></div>"
-            : '';
-        $lightsBlock = $lightsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">💡 Lichter</div><div class="tile-grid">' . $allLightsTile . $lightsHtml . '</div></div>'
-            : '';
-
-        $shuttersHtml = '';
-        foreach ($d['shutters'] as $shutter) {
-            $shuttersHtml .= $this->renderShutterTile($shutter);
-        }
-        $shuttersBlock = $shuttersHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🪟 Rollläden</div><div class="tile-grid">' . $shuttersHtml . '</div></div>'
-            : '';
-
-        $sensorsHtml = '';
-        foreach ($d['sensors'] as $sensor) {
-            $sensorsHtml .= $this->renderSensorTile($sensor);
-        }
-        $sensorsBlock = $sensorsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">📡 Sensoren</div><div class="current-grid">' . $sensorsHtml . '</div></div>'
-            : '';
-
-        $smokeHtml     = '';
-        $showSmokeName = count($d['smokeDetectors']) > 1;
-        foreach ($d['smokeDetectors'] as $detector) {
-            $smokeHtml .= $this->renderSmokeDetectorTile($detector, $showSmokeName);
-        }
-        $smokeBlock = $smokeHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🚨 Rauchmelder</div><div class="tile-grid">' . $smokeHtml . '</div></div>'
-            : '';
-
-        $vacuumsHtml = '';
-        foreach ($d['vacuums'] as $vacuum) {
-            $vacuumsHtml .= $this->renderVacuumTile($vacuum);
-        }
-        $vacuumsBlock = $vacuumsHtml !== ''
-            ? '<div class="pv-block"><div class="pv-title">🤖 Saugroboter</div><div class="tile-grid">' . $vacuumsHtml . '</div></div>'
-            : '';
-
-        $roomNameEsc = htmlspecialchars($d['roomName'], ENT_QUOTES);
-        $updatedEsc  = htmlspecialchars($d['updated'], ENT_QUOTES);
-        $initJson    = json_encode($d);
-
-        return <<<HTML
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-html{height:100%}
-*{box-sizing:border-box;margin:0;padding:0}
-body{overflow-y:auto;overflow-x:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;background:#0d1b2a;color:#d0e8ff;display:flex;flex-direction:column;padding:10px;gap:10px}
-.header{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:14px;font-weight:600;border-bottom:1px solid #1e3a5f;padding-bottom:6px;flex:none}
-.updated{font-size:10px;color:#3a5a7a;font-weight:400}
-.badge{padding:3px 8px;border-radius:12px;font-size:12px;border:1px solid transparent;white-space:nowrap}
-.badge-off{background:#1a2535;border-color:#2a3a50;color:#4a6a8a}
-.badge-on{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
-.badge-warn{background:#4a2010;border-color:#8a4020;color:#f08060}
-.status-row{display:flex;gap:6px;flex-wrap:wrap;flex:none}
-.current-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;flex:none}
-.tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:none}
-.cur-tile{display:flex;flex-direction:column;gap:1px;background:#131f33;border-radius:8px;padding:6px 8px}
-.cur-label{font-size:10px;color:#4a6a8a;text-transform:uppercase;letter-spacing:.03em}
-.cur-value{font-size:15px;font-weight:700;color:#d0e8ff}
-.valve-gauge{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px}
-.valve-bar{width:100%;height:8px;background:#1e2d40;border-radius:4px;overflow:hidden}
-.valve-fill{height:100%;background:#3ba9f5;border-radius:4px;transition:width .3s}
-.valve-pct{font-size:12px;font-weight:700;color:#d0e8ff;text-align:right}
-.pv-block{display:flex;flex-direction:column;gap:8px;flex:none;background:#0f1c30;border-radius:10px;padding:8px}
-.pv-title{font-size:12px;font-weight:700;color:#d0e8ff}
-.mode-select{width:100%;background:#131f33;color:#d0e8ff;border:1px solid #2a3a50;border-radius:6px;padding:6px 8px;font-size:12px}
-.light-tile{display:flex;flex-direction:column;gap:4px;background:#131f33;border-radius:8px;padding:6px 8px;border:1px solid #1e3a5f}
-.light-name{font-size:11px;color:#8aa8c8}
-/* Kompakter Icon-Schalter fuer Kacheln mit weiteren eigenen Klickzielen (Farb-/Dimmer-Licht) --
-   moderner als die lange Pille, aber kein Whole-Tile-Click, da Slider/Farbwahl daneben sitzen. */
-.icon-toggle{width:28px;height:28px;flex:none;border-radius:8px;border:1px solid #2a3a50;background:#1a2535;color:#8aa8c8;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background-color .15s,color .15s,border-color .15s}
-.icon-toggle.on{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
-.light-value{font-size:10px;color:#4a6a8a;align-self:flex-end}
-.light-slider{width:100%;accent-color:#7ec8f0}
-/* Reine Schalter-Kacheln (Licht an/aus, Bool-Automation): die ganze Kachel ist der Button,
-   kein eingebetteter Zweit-Schalter -- Dimmer/Farb-Kacheln behalten ihren echten Schalter,
-   da dort Slider/Farbwahl eigene Klickziele in derselben Kachel brauchen. */
-.light-tile.clickable{flex-direction:row;align-items:center;justify-content:space-between;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;transition:background-color .15s,transform .08s;border:1px solid #1e3a5f}
-.light-tile.clickable:active{transform:scale(.97)}
-.light-tile.clickable .tile-icon{font-size:15px;color:#4a6a8a;flex:none;transition:color .15s}
-.light-tile.clickable.on{background:#1a3448;border-color:#2a7aa0}
-.light-tile.clickable.on .tile-icon{color:#7ec8f0}
-.toggle{position:relative;width:44px;height:24px;flex:none;display:inline-block}
-.toggle input{opacity:0;position:absolute;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
-.toggle-track{position:absolute;inset:0;background:#1a2535;border:1px solid #2a3a50;border-radius:12px;transition:.15s}
-.toggle-thumb{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#8aa8c8;border-radius:50%;transition:.15s}
-.toggle input:checked ~ .toggle-track{background:#12405a;border-color:#2a7aa0}
-.toggle input:checked ~ .toggle-track .toggle-thumb{transform:translateX(20px);background:#7ec8f0}
-.sonos-now-playing{display:flex;gap:10px;align-items:center}
-.sonos-cover{width:56px;height:56px;border-radius:8px;object-fit:cover;background:#131f33;flex:none}
-.sonos-cover-empty{display:flex;align-items:center;justify-content:center;font-size:24px}
-.sonos-track-info{display:flex;flex-direction:column;gap:2px;overflow:hidden}
-.sonos-title{font-size:13px;font-weight:700;color:#d0e8ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sonos-artist{font-size:11px;color:#8aa8c8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sonos-controls{display:flex;align-items:center;gap:8px;justify-content:center}
-.sonos-btn{background:#131f33;border:1px solid #2a3a50;color:#d0e8ff;border-radius:8px;font-size:16px;padding:6px 10px;cursor:pointer}
-.sonos-btn-main{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-size:18px}
-.sonos-mute{margin-left:auto}
-.sonos-volume-row{display:flex;flex-direction:column;gap:4px}
-.thermo-stack{display:flex;flex-direction:column;gap:10px}
-.thermo-tile{display:flex;flex-direction:column;gap:10px;background:linear-gradient(160deg,#15233a,#101c30);border-radius:14px;padding:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
-.thermo-name{font-size:12px;font-weight:600;color:#d0e8ff}
-.thermo-body{display:flex;align-items:center;gap:16px}
-.thermo-stats{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
-.dial{position:relative;width:96px;height:96px;flex:none;touch-action:none}
-.dial-svg{width:96px;height:96px;display:block;cursor:pointer}
-.dial-track{transition:stroke .2s}
-.dial-arc{transition:stroke .15s,d .15s}
+        $css = <<<'CSS'
+.small-value .tk-value{font-size:15px}
+/* Thermostat: Drehregler + Ist/Ventil, Betriebsart als Buttonreihe */
+.thermo{gap:8px;justify-content:flex-start}
+.thermo-body{display:flex;align-items:center;gap:14px}
+.thermo-stats{display:flex;flex-direction:column;gap:8px;flex:1;min-width:0}
+.dial{position:relative;width:104px;height:104px;flex:none;touch-action:none}
+.dial-svg{width:104px;height:104px;display:block;cursor:pointer}
+.dial-arc{transition:stroke .15s}
 .dial-thumb{transition:fill .15s}
-.dial-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;pointer-events:none}
-.dial-value{font-size:17px;font-weight:700;transition:color .15s}
-.dial-caption{font-size:9px;color:#4a6a8a;text-transform:uppercase;letter-spacing:.05em}
-.mode-row{display:flex;gap:4px;flex-wrap:wrap}
-.mode-btn{flex:1;min-width:56px;background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;font-size:10px;padding:5px 2px;cursor:pointer}
-.mode-btn.mode-active{background:#1e4a6e;border-color:#3a8abf;color:#7ec8f0;font-weight:700}
-.humidity-result{font-size:12px;color:#8aa8c8;line-height:1.4}
-.light-tile-color{gap:6px}
-.light-tile-head{display:flex;justify-content:space-between;align-items:center;gap:6px}
-.light-tile-controls{display:flex;align-items:center;gap:8px}
-.color-picker{width:26px;height:26px;flex:none;border:1px solid #2a3a50;border-radius:6px;padding:0;background:none;cursor:pointer}
-.status-btn-group{display:flex;flex-wrap:wrap;gap:4px}
-.status-btn{background:#1a2535;border:1px solid #2a3a50;color:#8aa8c8;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer}
-.status-btn-active{background:#12405a;border-color:#2a7aa0;color:#7ec8f0}
-.shutter-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:6px 8px}
-.shutter-head{display:flex;justify-content:space-between;align-items:center}
-.shutter-btns{display:flex;gap:6px}
-.shutter-btn{flex:1;background:#1a2535;border:1px solid #2a3a50;color:#d0e8ff;border-radius:6px;font-size:11px;padding:6px 4px;cursor:pointer}
-.shutter-btn-stop{flex:0 0 34px;color:#f08060}
-.smoke-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
-.smoke-footer{font-size:10px;color:#4a6a8a}
-.vacuum-tile{display:flex;flex-direction:column;gap:6px;background:#131f33;border-radius:8px;padding:8px}
-.vacuum-head{display:flex;justify-content:space-between;align-items:center;gap:6px}
-</style>
-</head>
-<body>
-<div class="header">
-  <span>🏠 {$roomNameEsc} <span id="updated" class="updated">Stand {$updatedEsc}</span></span>
-</div>
-
-{$thermoBlock}
-{$humidityBlock}
-{$statusVarsBlock}
-{$automationsBlock}
-{$sonosBlock}
-{$lightsBlock}
-{$shuttersBlock}
-{$sensorsBlock}
-{$smokeBlock}
-{$vacuumsBlock}
-
-<script>
-(function() {
-  var cs = getComputedStyle(document.body);
-  var vExtra = (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
-  document.body.style.height = 'calc(100% - ' + vExtra + 'px)';
-})();
-
-var state = {$initJson};
-
-function setText(id, text) {
-  var el = document.getElementById(id);
-  if (el) el.textContent = text;
+.dial-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.dial-value{font-size:var(--tk-fs-value);font-weight:700;transition:color .15s}
+.valve-bar{height:8px;margin-top:4px;background:var(--tk-border);border-radius:4px;overflow:hidden}
+.valve-fill{height:100%;background:var(--tk-accent);border-radius:4px;transition:width .3s}
+/* Licht: ganze Kachel schaltet, Regler/Farbe darin */
+.light,.shutter{justify-content:flex-start;gap:6px}
+.light .tk-row{margin-top:0}
+.light-head{margin-left:auto;display:flex}
+.light-head:empty{display:none}
+.shutter .tk-sub{white-space:nowrap}
+.light-ctrl{display:flex;align-items:center;gap:8px;cursor:default}
+.light-pct{min-width:34px;text-align:right}
+.tk-color{width:30px;height:30px;flex:none;border:1px solid var(--tk-border);border-radius:7px;padding:0;background:none;cursor:pointer}
+.vac,.sonos{justify-content:flex-start;gap:6px}
+.sonos-now{display:flex;gap:10px;align-items:center;min-width:0}
+.sonos-cover{width:56px;height:56px;border-radius:8px;object-fit:cover;background:var(--tk-surface-2);flex:none}
+.sonos-info{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sonos-title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+CSS;
+        $js = <<<'JS'
+// Auswahl (Status, Betriebsart, Saugstaerke): sofort markieren, dann schreiben
+function pick(ident, btn) {
+  Array.prototype.forEach.call(btn.parentElement.children, function (b) { b.classList.toggle('tk-on', b === btn); });
+  requestAction(ident, btn.getAttribute('data-value'));
 }
-
-function sonosTogglePlay() {
-  var btn = document.getElementById('sonos_playpause');
-  var playing = btn.getAttribute('data-playing') === '1';
-  requestAction('sonos_status', playing ? 3 : 2); // Pause : Play
+function lightToggle(id) {
+  var c = tk.el(id + '_card'), next = !(c && c.classList.contains('tk-on'));
+  if (c) c.classList.toggle('tk-on', next);
+  requestAction(id + '_on', next);
 }
-
-function toggleFlatSwitch(ident) {
-  var input = document.getElementById(ident + '_input');
-  var tile = document.getElementById(ident);
-  var next = input ? !input.checked : true;
-  if (input) input.checked = next;
-  if (tile) tile.classList.toggle('on', next);
-  requestAction(ident, next);
+function dimToggle(id) {
+  var c = tk.el(id + '_card'), next = c && c.classList.contains('tk-on') ? 0 : 100;
+  if (c) c.classList.toggle('tk-on', next > 0);
+  tk.el(id + '_brightness_range').value = next; tk.setText(id + '_brightness_val', next + ' %');
+  requestAction(id + '_brightness', next);
 }
+function sonosPlay() { var b = tk.el('sonos_play'); requestAction('sonos_status', b && b.classList.contains('tk-on') ? 3 : 2); }
+function sonosMute() { var b = tk.el('sonos_mute'), next = !(b && b.classList.contains('tk-on')); if (b) b.classList.toggle('tk-on', next); requestAction('sonos_mute', next); }
 
-function toggleIconLight(ident) {
-  var input = document.getElementById(ident + '_on_input');
-  var btn = document.getElementById(ident + '_on_btn');
-  var next = input ? !input.checked : true;
-  if (input) input.checked = next;
-  if (btn) btn.classList.toggle('on', next);
-  requestAction(ident + '_on', next);
-}
-
-function statusVarSelect(ident, value, btn) {
-  requestAction(ident, value);
-  var group = btn.parentElement;
-  Array.prototype.forEach.call(group.children, function(b) { b.classList.remove('status-btn-active'); });
-  btn.classList.add('status-btn-active');
-}
-
-var dialRoots = {};
-var DIAL_COLD = [63, 169, 245];
-var DIAL_HOT = [242, 85, 90];
-
-function valueToThumb(value, min, max) {
-  var frac = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
-  var angleDeg = -135 + frac * 270;
-  var rad = angleDeg * Math.PI / 180;
-  return { x: 60 + 45 * Math.sin(rad), y: 60 - 45 * Math.cos(rad) };
-}
-
-function dialColor(frac) {
-  frac = Math.max(0, Math.min(1, frac));
-  var r = Math.round(DIAL_COLD[0] + (DIAL_HOT[0] - DIAL_COLD[0]) * frac);
-  var g = Math.round(DIAL_COLD[1] + (DIAL_HOT[1] - DIAL_COLD[1]) * frac);
-  var b = Math.round(DIAL_COLD[2] + (DIAL_HOT[2] - DIAL_COLD[2]) * frac);
-  return 'rgb(' + r + ',' + g + ',' + b + ')';
-}
-
-function dialArcPath(frac) {
-  frac = Math.max(0, Math.min(1, frac));
-  var sweepDeg = frac * 270;
-  var endRad = (-135 + sweepDeg) * Math.PI / 180;
-  var ex = (60 + 45 * Math.sin(endRad)).toFixed(1);
-  var ey = (60 - 45 * Math.cos(endRad)).toFixed(1);
-  var largeArc = sweepDeg > 180 ? 1 : 0;
-  return 'M 28.2 91.8 A 45 45 0 ' + largeArc + ' 1 ' + ex + ' ' + ey;
-}
-
-function initDial(root) {
-  var svg = root.querySelector('.dial-svg');
-  var thumb = root.querySelector('.dial-thumb');
-  var arc = root.querySelector('.dial-arc');
-  var valueEl = root.querySelector('.dial-value');
-  var min = parseFloat(root.dataset.min);
-  var max = parseFloat(root.dataset.max);
-  var step = parseFloat(root.dataset.step);
-  var ident = root.dataset.ident;
-  var dragging = false;
-  var currentValue = parseFloat(root.dataset.value);
-
-  function svgPoint(clientX, clientY) {
-    var pt = svg.createSVGPoint();
-    pt.x = clientX; pt.y = clientY;
-    var ctm = svg.getScreenCTM();
-    if (!ctm) return { x: 60, y: 60 };
-    return pt.matrixTransform(ctm.inverse());
+// Drehregler (Ziehen setzt Soll, Loslassen schreibt)
+var dials = {};
+function dialColor(f) { f = Math.max(0, Math.min(1, f)); var c = [63, 169, 245], h = [242, 85, 90]; return 'rgb(' + c.map(function (v, i) { return Math.round(v + (h[i] - v) * f); }).join(',') + ')'; }
+function dialArc(f) { f = Math.max(0, Math.min(1, f)); var s = f * 270, r = (-135 + s) * Math.PI / 180; return 'M 28.2 91.8 A 45 45 0 ' + (s > 180 ? 1 : 0) + ' 1 ' + (60 + 45 * Math.sin(r)).toFixed(1) + ' ' + (60 - 45 * Math.cos(r)).toFixed(1); }
+document.querySelectorAll('.dial').forEach(function (root) {
+  var svg = root.querySelector('.dial-svg'), thumb = root.querySelector('.dial-thumb'), arc = root.querySelector('.dial-arc'), val = root.querySelector('.dial-value');
+  var min = +root.dataset.min, max = +root.dataset.max, step = +root.dataset.step, cur = +root.dataset.value, drag = false;
+  function show(v) {
+    var f = max > min ? Math.max(0, Math.min(1, (v - min) / (max - min))) : 0, r = (-135 + f * 270) * Math.PI / 180, col = dialColor(f);
+    thumb.setAttribute('cx', (60 + 45 * Math.sin(r)).toFixed(1)); thumb.setAttribute('cy', (60 - 45 * Math.cos(r)).toFixed(1)); thumb.setAttribute('fill', col);
+    arc.setAttribute('d', dialArc(f)); arc.setAttribute('stroke', col);
+    val.textContent = v.toFixed(1).replace('.', ',') + '°'; val.style.color = col;
   }
+  function at(e) {
+    var pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY; var m = svg.getScreenCTM(); if (!m) return;
+    var p = pt.matrixTransform(m.inverse()), a = Math.max(-135, Math.min(135, Math.atan2(p.x - 60, 60 - p.y) * 180 / Math.PI));
+    cur = Math.round((min + (a + 135) / 270 * (max - min)) / step) * step; show(cur);
+  }
+  svg.addEventListener('pointerdown', function (e) { drag = true; svg.setPointerCapture(e.pointerId); at(e); });
+  svg.addEventListener('pointermove', function (e) { if (drag) at(e); });
+  function end() { if (drag) { drag = false; requestAction(root.dataset.ident, cur); } }
+  svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+  dials[root.dataset.ident] = { show: show, busy: function () { return drag; } };
+});
 
-  function updateVisual(value) {
-    var frac = max > min ? Math.max(0, Math.min(1, (value - min) / (max - min))) : 0;
-    var pos = valueToThumb(value, min, max);
-    var color = dialColor(frac);
-    thumb.setAttribute('cx', pos.x.toFixed(1));
-    thumb.setAttribute('cy', pos.y.toFixed(1));
-    thumb.setAttribute('fill', color);
-    if (arc) {
-      arc.setAttribute('d', dialArcPath(frac));
-      arc.setAttribute('stroke', color);
+// Live-Updates: flache Liste aus PHP (ops) anwenden
+var STATES = ['ok', 'warn', 'alarm'];
+tk.on('__all__', function (p) {
+  p.ops.forEach(function (o) {
+    var k = o[0], id = o[1], v = o[2], e = tk.el(id);
+    if (k === 't') tk.setText(id, v);
+    else if (k === 'o') tk.setOn(id, v);
+    else if (k === 'v') { if (e && document.activeElement !== e && String(e.value) !== String(v)) e.value = v; }
+    else if (k === 'w') { if (e) e.style.width = v + '%'; }
+    else if (k === 'src') { if (e && v && e.getAttribute('src') !== v) { e.style.visibility = ''; e.src = v; } }
+    else if (k === 'd') { var d = dials[id]; if (d && v !== null && !d.busy()) d.show(+v); }
+    else if (k === 'g') { var g = tk.el(id + '_seg'); if (g) Array.prototype.forEach.call(g.children, function (b) { b.classList.toggle('tk-on', b.getAttribute('data-value') === String(v)); }); }
+    else if (k === 's') {
+      var card = tk.el(id + '_card'), st = tk.el(id + '_status') || e;
+      if (card) { card.classList.toggle('tk-is-alarm', v === 'alarm'); card.classList.toggle('tk-is-warn', v === 'warn'); }
+      if (st) STATES.forEach(function (s) { st.classList.toggle('tk-' + s, s === v); });
     }
-    if (valueEl) {
-      valueEl.textContent = value.toFixed(1).replace('.', ',') + '°';
-      valueEl.style.color = color;
-    }
-  }
-
-  function setFromClient(clientX, clientY) {
-    var p = svgPoint(clientX, clientY);
-    var dx = p.x - 60, dy = p.y - 60;
-    var angleDeg = Math.atan2(dx, -dy) * 180 / Math.PI;
-    angleDeg = Math.max(-135, Math.min(135, angleDeg));
-    var frac = (angleDeg + 135) / 270;
-    var value = min + frac * (max - min);
-    value = Math.round(value / step) * step;
-    currentValue = value;
-    updateVisual(value);
-  }
-
-  svg.addEventListener('pointerdown', function(e) {
-    dragging = true;
-    svg.setPointerCapture(e.pointerId);
-    setFromClient(e.clientX, e.clientY);
   });
-  svg.addEventListener('pointermove', function(e) {
-    if (dragging) setFromClient(e.clientX, e.clientY);
-  });
-  function endDrag() {
-    if (!dragging) return;
-    dragging = false;
-    requestAction(ident, currentValue);
-  }
-  svg.addEventListener('pointerup', endDrag);
-  svg.addEventListener('pointercancel', endDrag);
-
-  root._updateVisual = updateVisual;
-  dialRoots[ident] = root;
-}
-document.querySelectorAll('.dial').forEach(initDial);
-
-function updateModeButtons(ident, value) {
-  var row = document.querySelector('.mode-row[data-ident="' + ident + '"]');
-  if (!row) return;
-  row.querySelectorAll('.mode-btn').forEach(function(btn) {
-    btn.classList.toggle('mode-active', btn.dataset.value === value);
-  });
-}
-
-window.handleMessage = function(raw) {
-  var msg = JSON.parse(raw);
-  var key = msg.key, val = msg.value;
-
-  if (key === '__all__') {
-    state = val;
-    setText('updated', 'Stand ' + val.updated);
-
-    var presenceVal = document.getElementById('presence_badge_val');
-    if (presenceVal && val.presence != null) {
-      presenceVal.style.color = val.presence ? '#7ee89a' : '#4a6a8a';
-      presenceVal.textContent = (val.presence ? '🧍 Anwesend' : '🚶 Abwesend');
-    }
-
-    (val.statusVars || []).forEach(function(row) {
-      var group = document.getElementById(row.ident + '_group');
-      if (group) {
-        Array.prototype.forEach.call(group.children, function(b) {
-          b.classList.toggle('status-btn-active', b.getAttribute('data-value') === String(row.value));
-        });
-      }
-    });
-
-    (val.thermostats || []).forEach(function(t) {
-      var dialRoot = dialRoots[t.ident + '_soll'];
-      if (dialRoot && t.soll != null) dialRoot._updateVisual(t.soll);
-      if (t.ist != null) setText(t.ident + '_ist', t.ist.toFixed(1).replace('.', ',') + ' °C');
-      if (t.mode != null) updateModeButtons(t.ident + '_mode', t.mode);
-      if (t.valve != null) {
-        var valveFill = document.getElementById(t.ident + '_valve_fill');
-        if (valveFill) valveFill.style.width = Math.round(t.valve) + '%';
-        setText(t.ident + '_valve_pct', Math.round(t.valve) + '%');
-      }
-    });
-
-    if (val.humidity) {
-      if (val.humidity.sensor != null) setText('humidity_sensor', val.humidity.sensor.toFixed(1).replace('.', ',') + ' %');
-      setText('humidity_result', val.humidity.result || '–');
-      setText('humidity_dp_out', val.humidity.dewPointOut != null ? val.humidity.dewPointOut.toFixed(1).replace('.', ',') + ' °C' : '–');
-      setText('humidity_dp_in', val.humidity.dewPointIn != null ? val.humidity.dewPointIn.toFixed(1).replace('.', ',') + ' °C' : '–');
-      var hintVal = document.getElementById('humidity_hint_val');
-      if (hintVal && val.humidity.hint != null) {
-        hintVal.style.color = val.humidity.hint ? '#f0c060' : '#4a6a8a';
-        hintVal.textContent = (val.humidity.hint ? '💨 Empfohlen' : '🚪 Nicht nötig');
-      }
-    }
-
-    if (val.sonos) {
-      setText('sonos_title', val.sonos.title || '–');
-      setText('sonos_artist', val.sonos.artist || '');
-      var cover = document.getElementById('sonos_cover');
-      if (cover && cover.tagName === 'IMG' && val.sonos.cover) cover.src = val.sonos.cover;
-      var playBtn = document.getElementById('sonos_playpause');
-      if (playBtn) {
-        var playing = val.sonos.status === 2;
-        playBtn.setAttribute('data-playing', playing ? '1' : '0');
-        playBtn.textContent = playing ? '⏸' : '▶';
-      }
-      var muteInput = document.getElementById('sonos_mute_input');
-      if (muteInput && val.sonos.mute != null) muteInput.checked = val.sonos.mute;
-      var volRange = document.getElementById('sonos_volume_range');
-      var vol = val.sonos.isGrouped ? val.sonos.groupVolume : val.sonos.volume;
-      if (volRange && vol != null) volRange.value = vol;
-      if (vol != null) setText('sonos_volume_label', '🔊 ' + vol + '%');
-      var playlistSelect = document.getElementById('sonos_playlist_select');
-      if (playlistSelect && val.sonos.playlist != null) playlistSelect.value = val.sonos.playlist;
-      var groupSelect = document.getElementById('sonos_group_select');
-      if (groupSelect && val.sonos.group != null) groupSelect.value = val.sonos.group;
-    }
-
-    (val.lights || []).forEach(function(light) {
-      var onInput = document.getElementById(light.ident + '_on_input');
-      if (onInput && light.on != null) onInput.checked = light.on;
-      var onTile = document.getElementById(light.ident + '_on');
-      if (onTile && light.on != null) onTile.classList.toggle('on', !!light.on);
-      var onBtn = document.getElementById(light.ident + '_on_btn');
-      if (onBtn && light.on != null) onBtn.classList.toggle('on', !!light.on);
-      var range = document.getElementById(light.ident + '_brightness_range');
-      var lbl = document.getElementById(light.ident + '_brightness_val');
-      if (range && light.brightness != null) range.value = Math.round(light.brightness);
-      if (lbl && light.brightness != null) lbl.textContent = Math.round(light.brightness) + '%';
-      var colorInput = document.getElementById(light.ident + '_color_input');
-      if (colorInput && light.color != null) colorInput.value = '#' + ('000000' + light.color.toString(16)).slice(-6);
-    });
-
-    var allLightsInput = document.getElementById('lights_all_input');
-    if (allLightsInput && val.lights) {
-      var anyOn = val.lights.some(function(l) {
-        return l.kind === 'dimmer' ? (l.brightness > 0) : !!l.on;
-      });
-      allLightsInput.checked = anyOn;
-    }
-
-    (val.shutters || []).forEach(function(shutter) {
-      if (shutter.kind !== 'position' || shutter.value == null) return;
-      var range = document.getElementById(shutter.ident + '_range');
-      var lbl = document.getElementById(shutter.ident + '_val');
-      if (range) range.value = Math.round(shutter.value);
-      if (lbl) lbl.textContent = Math.round(shutter.value) + '% zu';
-    });
-
-    (val.automations || []).forEach(function(a) {
-      var input = document.getElementById(a.ident + '_input');
-      if (input && a.on != null) input.checked = a.on;
-      var tile = document.getElementById(a.ident);
-      if (tile && a.on != null) tile.classList.toggle('on', !!a.on);
-      var group = document.getElementById(a.ident + '_group');
-      if (group) {
-        Array.prototype.forEach.call(group.children, function(b) {
-          b.classList.toggle('status-btn-active', b.getAttribute('data-value') === String(a.value));
-        });
-      }
-    });
-  }
-};
-</script>
-</body>
-</html>
-HTML;
+});
+JS;
+        return $this->tkPage($v['title'], '🏠', $v['updated'], "<div class=\"tk-grid\">{$body}</div>", $css, $js, 'null');
     }
 }
